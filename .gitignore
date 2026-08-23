@@ -1,0 +1,51 @@
+# Claude Code
+.claude/
+
+# Project docs (local-only)
+AI_Incident_Commander_Project_Idea.md
+BUILD_PLAN.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg
+build/
+dist/
+
+# Node / frontend
+node_modules/
+.next/
+dist/
+build/
+*.tsbuildinfo
+.vite/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Docker
+*.pid
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Logs
+*.log
+logs/
+
+# Misc caches / dbs
+*.sqlite3
+.cache/
