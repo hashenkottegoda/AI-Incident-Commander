@@ -1,0 +1,38 @@
+# Dev-only infrastructure for AI Incident Commander.
+# `docker compose up -d` boots postgres + qdrant with persistent volumes.
+# The `backend` service is added in a later Phase 0 step once the FastAPI app exists.
+#
+# Credentials below are dev-only defaults, not secrets — do not reuse in production.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: incident_commander_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: incident_commander
+      POSTGRES_PASSWORD: incident_commander
+      POSTGRES_DB: incident_commander
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U incident_commander -d incident_commander"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.1
+    container_name: incident_commander_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  postgres_data:
+  qdrant_data:
