@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    # Matches docker-compose.yml's postgres service (same dev-only
+    # credentials) so tests/test_db.py exercises real Postgres in CI
+    # instead of always skipping.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: incident_commander
+          POSTGRES_PASSWORD: incident_commander
+          POSTGRES_DB: incident_commander
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U incident_commander -d incident_commander"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Test (pytest)
+        run: uv run pytest
