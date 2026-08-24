@@ -100,6 +100,29 @@ class Hypothesis(BaseModel):
     rationale: str = Field(
         description="Short explanation of why the evidence points to this category."
     )
+    # Optional and additive (default None) -- added for Phase 5's conditional
+    # re-investigation loop, which needs a per-hypothesis confidence value to
+    # compare the top-2 ranked hypotheses' confidence gap
+    # (backend.agents.routing.confidence_gap_below_threshold).
+    # DiagnosisResult.diagnostic_confidence is a single overall float, not
+    # per-hypothesis, so there was no existing field this could reuse.
+    # Additive/optional by construction: Phase 3's baseline investigator
+    # (backend.agents.investigator, frozen per this task's instructions)
+    # never reads or writes this field -- its STRUCTURED_OUTPUT_INSTRUCTION
+    # doesn't mention it, so the model simply leaves it unset (None) and
+    # Experiment B's existing behavior/output shape is unchanged.
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Optional per-hypothesis heuristic confidence (0.0-1.0), same "
+            "self-reported-estimate caveat as diagnostic_confidence -- not a "
+            "calibrated probability. Populated by Phase 5's Root Cause node "
+            "so the conditional re-investigation loop can compare how close "
+            "the top two ranked hypotheses are."
+        ),
+    )
 
 
 class DiagnosisResult(BaseModel):
