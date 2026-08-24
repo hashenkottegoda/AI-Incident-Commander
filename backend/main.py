@@ -11,6 +11,7 @@ layer in a later Phase 0 sub-step.
 from fastapi import FastAPI
 
 from backend.api.health import router as health_router
+from backend.api.simulation import router as simulation_router
 from backend.config import get_settings
 
 # Read + validate settings at startup (fail fast on missing required env vars).
@@ -19,3 +20,4 @@ get_settings()
 app = FastAPI(title="AI Incident Commander")
 
 app.include_router(health_router)
+app.include_router(simulation_router)
