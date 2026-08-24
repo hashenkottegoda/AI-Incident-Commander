@@ -1,0 +1,31 @@
+# bad_deployment — the "fast, obvious" scenario, deliberately contrasted
+# with db_connection_exhaustion and memory_leak: no slow resource buildup,
+# just a code bug that starts throwing errors immediately after rollout.
+# The causal_chain timestamps (see the telemetry generator, next build
+# step) should be tight/back-to-back rather than spread over minutes.
+
+failure_type: bad_deployment
+root_cause_category: application_bug
+affected_service: payment-service
+severity: P1
+
+expected_evidence:
+  - payment_deployment_v2.3.0
+  - error_rate_spike
+  - http_500_spike
+  - payment_request_failures
+
+causal_chain:
+  - payment_deployment_v2.3.0
+  - error_rate_spike
+  - http_500_spike
+  - payment_request_failures
+
+remediation_effects:
+  correct_remediation: rollback_deployment
+  on_correct:
+    error_rate: recovers_to_baseline
+    incident_status: resolved
+  ineffective_remediations:         # the bug is in the code, not resource pressure
+    - restart_service
+    - scale_service

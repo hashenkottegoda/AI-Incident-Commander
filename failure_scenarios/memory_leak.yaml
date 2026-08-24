@@ -1,0 +1,50 @@
+# memory_leak — deliberately NOT tied to a recent deployment.
+#
+# Design choice (documented per BUILD_PLAN.md's ask to make this
+# reasoning explicit): this is a slow, organic leak — e.g. a long-lived
+# in-process cache in inventory-service that never evicts — that
+# accumulates over hours, independent of any recent code change. There is
+# no deployment step in the causal_chain and `no_recent_deployment` is
+# itself a piece of expected_evidence: get_deployments (Phase 2) should
+# come back empty/stale for the incident window, which is exactly the
+# signal that should steer the agent away from rollback_deployment.
+#
+# Keeping it deploy-free avoids a logical contradiction: if a recent
+# deploy *had* introduced the leak, rolling it back would legitimately
+# remove the leaking code and should count as correct — but the scenario
+# is designed to make restart_service the one clearly correct answer
+# (restarting frees the leaked memory immediately), so the causal chain is
+# built to make that the only coherent fix. scale_service is ineffective
+# because every additional replica leaks on the same schedule — it dilutes
+# the symptom for a while but doesn't remove the leak, so under the
+# simulator's binary correct/ineffective model it counts as ineffective.
+# rollback_deployment is ineffective for the same "nothing to roll back
+# to" reason it would be for any non-deploy-caused incident.
+
+failure_type: memory_leak
+root_cause_category: memory_resource_exhaustion
+affected_service: inventory-service
+severity: P2
+
+expected_evidence:
+  - memory_usage_climbing
+  - gc_pause_increase
+  - oom_kill_event
+  - inventory_failures_high
+  - no_recent_deployment
+
+causal_chain:
+  - memory_usage_climbing
+  - gc_pause_increase
+  - oom_kill_event
+  - inventory_failures_high
+
+remediation_effects:
+  correct_remediation: restart_service
+  on_correct:
+    memory_usage: recovers_to_baseline
+    error_rate: recovers_to_baseline
+    incident_status: resolved
+  ineffective_remediations:
+    - rollback_deployment
+    - scale_service

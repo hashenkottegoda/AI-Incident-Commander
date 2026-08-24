@@ -1,0 +1,48 @@
+# dependency_failure — an external/upstream fault, not a checkout-side
+# code or resource problem. No deployment in the causal_chain: nothing
+# in checkout-service or payment-service's own code changed.
+#
+# Story: a payment-service integration is rolled out gradually behind a
+# feature flag (a canary path to a new payment provider). Once the flag is
+# enabled, that path turns out to be slow/unstable, so payment-service
+# latency and timeout rates climb, and checkout-service (the caller)
+# starts failing requests that depend on it.
+#
+# correct_remediation reasoning (documented per BUILD_PLAN.md's ask, since
+# it's not the obvious "rollback" pick this time): the instability is
+# gated behind the canary flag, not baked into a deployed version, so
+# rollback_deployment has nothing meaningful to roll back to and is
+# ineffective. restart_service/scale_service don't help either — the
+# problem lives in the payment provider itself, not in process health or
+# capacity. disable_feature_flag turns the canary path off and reroutes
+# checkout back to the stable payment integration, which is what actually
+# resolves it — so it's the one coherent correct_remediation here.
+
+failure_type: dependency_failure
+root_cause_category: upstream_dependency_failure
+affected_service: checkout-service
+severity: P1
+
+expected_evidence:
+  - payment_canary_flag_enabled
+  - payment_service_latency_high
+  - payment_service_timeout_errors
+  - checkout_dependency_errors
+  - checkout_failures
+
+causal_chain:
+  - payment_canary_flag_enabled
+  - payment_service_latency_high
+  - payment_service_timeout_errors
+  - checkout_failures
+
+remediation_effects:
+  correct_remediation: disable_feature_flag
+  on_correct:
+    payment_latency: recovers_to_baseline
+    error_rate: recovers_to_baseline
+    incident_status: resolved
+  ineffective_remediations:
+    - rollback_deployment
+    - restart_service
+    - scale_service

@@ -1,0 +1,71 @@
+# cascading_payment_timeout — the deliberately ambiguous scenario.
+# root cause is the payment dependency; the loudest visible symptom is
+# database overload on checkout-service. An agent that stops investigating
+# once it sees db_connections_high / database_overload_errors will land on
+# `database_connection_pool` (the same category as db_connection_exhaustion)
+# and score WRONG — root_cause_category here is deliberately
+# `upstream_dependency_timeout`, not a DB category, so that shortcut is
+# visibly penalized by Phase 7's enum-equality accuracy metric.
+#
+# expected_evidence deliberately carries both layers so the agent has a
+# real chance to trace back past the DB symptom:
+#   - quiet root-cause evidence: payment_service_latency_high,
+#     payment_service_timeout_errors (only visible by querying
+#     payment-service's own logs/metrics, not checkout's)
+#   - bridge evidence: checkout_retry_storm_detected (checkout's retry
+#     behavior against payment, e.g. via TraceLite's
+#     downstream_service_id linking checkout -> payment)
+#   - loud DB-symptom evidence: db_connections_high, database_overload_errors,
+#     checkout_failures
+#
+# causal_chain uses BUILD_PLAN.md's exact ordered chain.
+#
+# correct_remediation reasoning: the retry storm (checkout retrying
+# against a timing-out payment-service) is what actually drives the DB
+# connection growth, so the fix has to stop the retries, not add DB
+# capacity. Framed as: checkout's aggressive retry-on-timeout behavior
+# against payment is gated behind a feature flag/circuit-breaker toggle,
+# so disable_feature_flag (turning off retries, i.e. failing fast to
+# payment instead of hammering it) breaks the retry storm and lets both
+# payment and the DB pool recover. scale_service and
+# increase_connection_pool are the classic "fix DB overload" playbook an
+# agent that stopped at the symptom would reach for — both are explicitly
+# ineffective here since they don't touch the payment dependency at all
+# (and increase_connection_pool arguably makes the retry storm worse by
+# giving it more headroom). restart_service doesn't help since nothing is
+# actually crash-looping. rollback_deployment is ineffective too: there is
+# no deployment in this causal_chain (the fault is an external dependency
+# timeout), so there's nothing to roll back to.
+
+failure_type: cascading_payment_timeout
+root_cause_category: upstream_dependency_timeout
+affected_service: checkout-service
+severity: P1
+
+expected_evidence:
+  - payment_service_latency_high
+  - payment_service_timeout_errors
+  - checkout_retry_storm_detected
+  - db_connections_high
+  - database_overload_errors
+  - checkout_failures
+
+causal_chain:
+  - payment_timeout
+  - checkout_retry_storm
+  - db_connection_growth
+  - database_overload
+  - checkout_failures
+
+remediation_effects:
+  correct_remediation: disable_feature_flag
+  on_correct:
+    payment_error_rate: recovers_to_baseline
+    db_connections: recovers_to_baseline
+    error_rate: recovers_to_baseline
+    incident_status: resolved
+  ineffective_remediations:
+    - scale_service
+    - restart_service
+    - increase_connection_pool
+    - rollback_deployment

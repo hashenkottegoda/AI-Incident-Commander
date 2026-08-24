@@ -1,0 +1,54 @@
+# slow_query — a bad query plan / missing index on a hot inventory lookup.
+# Latency rises and, under load, queries start queuing/timing out. This is
+# the one scenario that is NOT a hard failure and NOT fixable by any of
+# the 5 standard executor actions (rollback_deployment, restart_service,
+# scale_service, disable_feature_flag, increase_connection_pool).
+#
+# Design choice (documented per BUILD_PLAN.md's ask, since this is the
+# least obvious remediation call of the six): no deployment introduced
+# this — the query/index has always been this way, it only becomes a
+# problem once traffic/data volume crosses a threshold. increase_connection_pool
+# was considered (queries holding connections longer could look like a
+# pool-pressure problem), but it's deliberately treated as a band-aid that
+# does NOT resolve the incident here: more connections just means more
+# concurrent slow queries competing for the same DB CPU/IO, which does not
+# bring latency back to baseline. The honest ground truth is that this
+# needs an actual query/index fix (a manual code change), which is outside
+# the executor's action palette entirely.
+#
+# Schema note: `correct_remediation`/`on_correct` are omitted (null) and
+# ALL 5 standard actions are listed as ineffective. This is a valid
+# reading of the remediation_effects schema (see
+# backend/simulation/scenario_schema.py's RemediationEffects: both fields
+# are optional and required to be null/non-null together) and is exactly
+# what Phase 6's Recovery Check needs: every attempted automated action
+# leaves metrics still degraded, so the bounded re-investigation loop
+# eventually exhausts and the incident correctly routes to
+# manual_intervention_required instead of a false `resolved`.
+
+failure_type: slow_query
+root_cause_category: inefficient_database_query
+affected_service: inventory-service
+severity: P3
+
+expected_evidence:
+  - inventory_slow_query_detected
+  - inventory_query_latency_high
+  - db_connection_queue_growth
+  - inventory_request_timeouts
+
+causal_chain:
+  - inventory_slow_query_detected
+  - inventory_query_latency_high
+  - db_connection_queue_growth
+  - inventory_request_timeouts
+
+remediation_effects:
+  correct_remediation: null
+  on_correct: null
+  ineffective_remediations:         # nothing in the executor's palette fixes this
+    - rollback_deployment
+    - restart_service
+    - scale_service
+    - disable_feature_flag
+    - increase_connection_pool

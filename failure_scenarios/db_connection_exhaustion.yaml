@@ -1,0 +1,36 @@
+# db_connection_exhaustion — the worked example from BUILD_PLAN.md's
+# "Failure Scenarios & Ground Truth" section, reproduced (near) verbatim.
+#
+# Story: a bad deploy holds DB connections open longer than it should
+# (e.g. a connection-leak regression), the pool fills up, and checkout
+# requests start failing once no connections are left to hand out.
+# rollback_deployment is correct because the leak is in the deployed code;
+# restart_service/scale_service are ineffective because they don't remove
+# the leaking code path — a fresh process (or more of them) leaks again
+# within minutes.
+
+failure_type: db_connection_exhaustion
+root_cause_category: database_connection_pool
+affected_service: checkout-service
+severity: P1
+
+expected_evidence:
+  - connection_pool_exhausted
+  - db_connections_high
+  - checkout_deployment_v1.8.2
+
+causal_chain:                       # ordered, not just the final root cause
+  - checkout_deployment_v1.8.2
+  - db_connection_growth
+  - connection_pool_exhausted
+  - checkout_failures
+
+remediation_effects:                # makes Recovery Check + remediation eval deterministic
+  correct_remediation: rollback_deployment
+  on_correct:                       # what the simulator must produce post-action
+    error_rate: recovers_to_baseline
+    db_connections: recovers_to_baseline
+    incident_status: resolved
+  ineffective_remediations:         # applied -> incident stays degraded
+    - scale_service
+    - restart_service
