@@ -2,6 +2,11 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
 
+# Import model modules so they register their tables on Base.metadata
+# before autogenerate inspects it below. `backend.db` intentionally does
+# not import this itself (it only owns engine/session/Base), so this
+# import has to happen somewhere in the alembic process — here.
+import backend.models  # noqa: E402,F401
 from alembic import context
 
 # Import the app's own settings/metadata rather than re-parsing .env or
@@ -24,9 +29,38 @@ if config.config_file_name is not None:
 # Override whatever placeholder is in alembic.ini with the real app URL.
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
-# Autogenerate support: empty until Phase 1 adds models under backend/models/
-# that subclass Base.
+# Autogenerate support: backend/models/ registers its tables on this
+# metadata via the `import backend.models` above.
 target_metadata = Base.metadata
+
+
+def include_name(name, type_, parent_names):
+    """Exclude LangGraph's own checkpoint tables from autogenerate diffing.
+
+    `checkpoints` / `checkpoint_blobs` / `checkpoint_writes` /
+    `checkpoint_migrations` live in the same Postgres instance (see
+    `backend/scripts/setup_checkpointer.py`) but are created and migrated
+    by `langgraph-checkpoint-postgres`'s own setup, not by SQLAlchemy
+    models/Alembic. Without this filter, autogenerate sees them as
+    "extra tables in the DB not in our metadata" and proposes dropping
+    them on every future `--autogenerate` run.
+    """
+    if type_ == "table" and name is not None and name.startswith("checkpoint"):
+        return False
+    return True
+
+
+# NOTE: the enum-as-VARCHAR CHECK constraints on IncidentStatus/Severity/
+# LogLevel (see backend/models/incident.py, backend/models/telemetry.py)
+# don't round-trip cleanly through Alembic's autogenerate comparator — it
+# can't reliably match the CHECK constraint text it renders from
+# `Enum(native_enum=False)` metadata against the introspected DB constraint,
+# so every future `alembic revision --autogenerate` will likely propose a
+# spurious drop/recreate of `incident_status`, `incident_severity`, and
+# `log_level`. This is a known SQLAlchemy/Alembic limitation, not a bug in
+# this schema. Always review the CHECK-constraint section of any future
+# autogenerate diff and strip these no-op operations before committing the
+# migration.
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -52,6 +86,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_name=include_name,
     )
 
     with context.begin_transaction():
@@ -73,7 +108,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            include_name=include_name,
         )
 
         with context.begin_transaction():
