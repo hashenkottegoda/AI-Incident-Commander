@@ -33,15 +33,22 @@ already each do "one LLM call + local post-processing" in a single node.
 
 ## What this node does NOT do yet
 
-No `interrupt()`, no `/approve`/`/reject` endpoint, no Action Executor, no
-Recovery Check -- those are later Phase 6 sub-steps. `EXECUTING` and
-`AWAITING_APPROVAL` are placeholder terminal states for this sub-step only:
-the graph currently ends right after this node either way (see
-`backend/graph.py`). "AUTO_EXECUTED but `executed_at` is still NULL" is the
-intentionally-modeled "queued for execution, not yet executed" state for a
-SAFE action at this point -- see `backend/models/audit.py`'s docstring for
-why `executed_at` starting NULL is exactly what makes the future Action
-Executor's idempotency guard work.
+No Action Executor, no Recovery Check -- those are later Phase 6
+sub-steps. The real `interrupt()`-based Human Approval gate now exists as
+a separate downstream node (`backend.agents.human_approval_node`, wired in
+`backend/graph.py`) and `POST /approve`/`/reject` now exist
+(`backend.api.approvals`) -- this node's own job is unchanged: propose
+actions, classify risk, write the `AuditEvent` rows, and set
+`incident_status`. `EXECUTING` (all-SAFE plan) is still a placeholder
+terminal state -- the graph ends right after this node for that branch
+until the Action Executor exists (see `backend/graph.py`). `EXECUTING`
+staying a plain state assignment rather than a real executor is exactly
+the same reasoning `human_approval_node` documents for the HIGH_IMPACT
+branch's own post-approval placeholder. "AUTO_EXECUTED but `executed_at`
+is still NULL" is the intentionally-modeled "queued for execution, not yet
+executed" state for a SAFE action at this point -- see
+`backend/models/audit.py`'s docstring for why `executed_at` starting NULL
+is exactly what makes the future Action Executor's idempotency guard work.
 
 ## Model routing
 

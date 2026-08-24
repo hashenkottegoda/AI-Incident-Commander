@@ -17,6 +17,7 @@ the predicates thoroughly without any mocking at all.
 from __future__ import annotations
 
 from backend.agents.state import IncidentState
+from backend.models.incident import IncidentStatus
 
 # --- Confidence-gap check ---------------------------------------------------
 
@@ -144,4 +145,26 @@ def route_after_root_cause(state: IncidentState) -> str:
         return "end"
     if should_reinvestigate(state):
         return "reinvestigate"
+    return "end"
+
+
+def route_after_response_planner(state: IncidentState) -> str:
+    """LangGraph conditional-edge callback for the RESPONSE PLANNER node.
+
+    `response_planner_node` already sets `incident_status` to
+    `AWAITING_APPROVAL` (any HIGH_IMPACT action present) or `EXECUTING`
+    (all-SAFE plan) -- see that module's docstring. Reusing that field
+    here rather than adding a new one: it's already the exact signal this
+    router needs ("does this incident have something pending a human
+    decision"), set by the one place (the deterministic Risk Classifier,
+    via `response_planner_node`) that's allowed to decide it.
+
+    Returns "human_approval" (routes to the `interrupt()` gate) when any
+    action was classified HIGH_IMPACT; otherwise "end" -- an all-SAFE plan
+    has nothing for a human to approve, so the graph ends right after
+    `response_planner_node` today (the not-yet-built Action Executor's
+    SAFE-branch entry point, per BUILD_PLAN.md's graph diagram).
+    """
+    if state.incident_status is IncidentStatus.AWAITING_APPROVAL:
+        return "human_approval"
     return "end"

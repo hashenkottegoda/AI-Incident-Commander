@@ -5,26 +5,33 @@ BUILD_PLAN.md Phase 5: *"Build the StateGraph: Triage -> Investigation loop
 -> RAG -> Root Cause/Hypothesis -> conditional re-investigation loop back to
 Investigation."* Phase 6 continues the same graph past Root Cause: *"RESPONSE
 PLANNER ... -> RISK CLASSIFIER ... -> SAFE -> ACTION EXECUTOR ... HIGH-IMPACT
--> HUMAN APPROVAL."* This module currently builds through the Response
-Planner + (inline) Risk Classifier only -- the Action Executor and the real
-`interrupt()`-based Human Approval gate are later Phase 6 sub-steps not
-built here (see `backend.agents.response_planner_node`'s docstring for the
-placeholder terminal states used in the meantime).
+-> HUMAN APPROVAL (LangGraph `interrupt`, resumed via POST /approve|/reject)."*
+This module now builds through the Response Planner + (inline) Risk
+Classifier + the real `interrupt()`-based Human Approval gate
+(`backend.agents.human_approval_node`) -- the Action Executor and Recovery
+Check are the next Phase 6 sub-steps, not built here (see that node's
+docstring for the placeholder it uses in the meantime).
 
 ```
-START -> triage -> investigation -> rag -> root_cause -+-> response_planner -> END
-                        ^                               |    (incident_status =
-                        +---- (reinvestigate) ----------+     EXECUTING | AWAITING_APPROVAL,
-                                                                a placeholder terminal state
-                                                                until the Action Executor /
-                                                                real approval interrupt() exist)
+START -> triage -> investigation -> rag -> root_cause -+-> response_planner -+-> human_approval
+                        ^                               |                    |         |
+                        +---- (reinvestigate) ----------+                    |         v
+                                                                              |        END
+                                                                              +-> END
 ```
+
+- `response_planner -> human_approval -> END`: any HIGH_IMPACT action.
+  `human_approval` calls `interrupt()`, resumed via `POST /approve` or
+  `/reject` (`backend.api.approvals`).
+- `response_planner -> END` directly: an all-SAFE plan, nothing for a
+  human to approve. `incident_status = EXECUTING` -- the not-yet-built
+  Action Executor's SAFE-branch entry point.
 
 `build_incident_graph` returns the **uncompiled** `StateGraph` -- callers
 attach whichever checkpointer fits their context: `AsyncPostgresSaver` for
-the real API path (`run_incident_graph` below), no checkpointer (or an
-in-memory one) for structural tests that only need to inspect
-nodes/edges/predicates without ever invoking the graph.
+the real API path (`run_incident_graph`/`resume_incident_graph` below), no
+checkpointer (or an in-memory one) for structural tests that only need to
+inspect nodes/edges/predicates without ever invoking the graph.
 """
 
 from __future__ import annotations
@@ -33,14 +40,16 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, StateSnapshot
 from qdrant_client import QdrantClient
 from sqlalchemy.orm import Session
 
+from backend.agents.human_approval_node import human_approval_node
 from backend.agents.investigation_node import make_investigation_node
 from backend.agents.rag_node import make_rag_node
 from backend.agents.response_planner_node import make_response_planner_node
 from backend.agents.root_cause_node import make_root_cause_node
-from backend.agents.routing import route_after_root_cause
+from backend.agents.routing import route_after_response_planner, route_after_root_cause
 from backend.agents.state import IncidentState
 from backend.agents.triage_node import make_triage_node
 from backend.config import get_settings
@@ -73,6 +82,7 @@ def build_incident_graph(db: Session, qdrant_client: QdrantClient | None = None)
     graph.add_node("rag", make_rag_node(qdrant_client))
     graph.add_node("root_cause", make_root_cause_node())
     graph.add_node("response_planner", make_response_planner_node(db))
+    graph.add_node("human_approval", human_approval_node)
 
     graph.add_edge(START, "triage")
     graph.add_edge("triage", "investigation")
@@ -83,12 +93,22 @@ def build_incident_graph(db: Session, qdrant_client: QdrantClient | None = None)
         route_after_root_cause,
         {"reinvestigate": "investigation", "end": "response_planner"},
     )
-    # response_planner is Phase 6's current terminal node: it sets
-    # incident_status to a placeholder (EXECUTING for an all-SAFE plan,
-    # AWAITING_APPROVAL if any HIGH_IMPACT action was proposed) and the
-    # graph ends there until the Action Executor / real approval
-    # interrupt() exist (see this node's own docstring).
-    graph.add_edge("response_planner", END)
+    # SAFE-only plan -> straight to END (incident_status = EXECUTING, the
+    # not-yet-built Action Executor's SAFE-branch entry point). Any
+    # HIGH_IMPACT action -> the interrupt() gate; see
+    # backend.agents.human_approval_node's docstring for why that gate is
+    # its own dedicated node rather than folded into response_planner.
+    graph.add_conditional_edges(
+        "response_planner",
+        route_after_response_planner,
+        {"human_approval": "human_approval", "end": END},
+    )
+    # human_approval is Phase 6's current terminal node on the HIGH_IMPACT
+    # branch: it pauses at interrupt() until POST /approve resumes it (see
+    # backend.api.approvals), then sets a placeholder post-approval
+    # incident_status and the graph ends there until the real Action
+    # Executor / Recovery Check exist.
+    graph.add_edge("human_approval", END)
     return graph
 
 
@@ -154,3 +174,72 @@ async def run_incident_graph(
         final_state = await compiled.ainvoke(initial_state(incident), config=config)
 
     return IncidentState.model_validate(final_state)
+
+
+async def resume_incident_graph(
+    db: Session,
+    incident: Incident,
+    resume_payload: dict[str, Any],
+    *,
+    qdrant_client: QdrantClient | None = None,
+    database_url: str | None = None,
+) -> IncidentState:
+    """Resume a thread paused at `human_approval_node`'s `interrupt()` call.
+
+    Only ever called by `POST /approve` (`backend.api.approvals`) -- never
+    by `POST /reject`, which decides and durably records a rejection
+    entirely on its own without touching this graph at all (see that
+    module's docstring for why "do not resume toward execution" is
+    implemented as "do not resume the graph," not as an in-graph branch).
+
+    `Command(resume=resume_payload)` is LangGraph's current (1.x) resume
+    API (`langgraph.types.Command`, verified against the installed
+    `langgraph==1.2.11`): passed as the first positional argument to
+    `ainvoke` in place of an initial-state dict, it re-enters the exact
+    checkpointed thread at its paused task and supplies `resume_payload`
+    as `human_approval_node`'s `interrupt()` return value. Everything else
+    mirrors `run_incident_graph` exactly -- same `thread_id`, same
+    freshly-opened-per-call `AsyncPostgresSaver` -- so this is genuinely
+    resuming the same persisted checkpoint, not starting a new run.
+
+    The caller (`backend.api.approvals`) is responsible for having already
+    durably recorded the approval decision on the relevant `AuditEvent`
+    row(s), under its own optimistic-concurrency guard, BEFORE calling
+    this function -- so this function is only ever invoked once per
+    genuine approval (see that module's idempotency guard).
+    """
+    dsn = to_psycopg_dsn(database_url or get_settings().database_url)
+    graph = build_incident_graph(db, qdrant_client)
+
+    async with AsyncPostgresSaver.from_conn_string(dsn) as saver:
+        compiled = graph.compile(checkpointer=saver)
+        config = {"configurable": {"thread_id": str(incident.id)}}
+        final_state = await compiled.ainvoke(Command(resume=resume_payload), config=config)
+
+    return IncidentState.model_validate(final_state)
+
+
+async def get_incident_thread_state(
+    db: Session,
+    incident: Incident,
+    *,
+    qdrant_client: QdrantClient | None = None,
+    database_url: str | None = None,
+) -> StateSnapshot:
+    """Return the raw LangGraph `StateSnapshot` for `incident`'s thread.
+
+    Read-only inspection of the checkpointer -- used to prove a graph run
+    genuinely halted at `interrupt()` (`snapshot.next == ("human_approval",)`
+    and `snapshot.interrupts` non-empty) rather than merely inferring it
+    from `IncidentState.incident_status`, which the Response Planner sets
+    to `AWAITING_APPROVAL` regardless of whether the graph actually paused.
+    Exists mainly for tests; `backend.api.approvals` doesn't need this --
+    it gates on `AuditEvent.decision_status` instead (see that module).
+    """
+    dsn = to_psycopg_dsn(database_url or get_settings().database_url)
+    graph = build_incident_graph(db, qdrant_client)
+
+    async with AsyncPostgresSaver.from_conn_string(dsn) as saver:
+        compiled = graph.compile(checkpointer=saver)
+        config = {"configurable": {"thread_id": str(incident.id)}}
+        return await compiled.aget_state(config)
