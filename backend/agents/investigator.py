@@ -34,12 +34,13 @@ into genuinely separate graph nodes, at which point the RCA half moves to
 
 ## Tool-call budget
 
-`MAX_TOOL_CALLS = 10`: enough to touch all four tool types
-(logs/metrics/deployments/dependencies) against the affected service and
-one hop of dependencies, with room for a couple of follow-up/narrower
-queries, while still bounding cost and blocking the "repeatedly query the
-same thing" runaway-loop failure mode the idea doc calls out. This is a
-real cost/safety control, not a decorative constant. The budget is
+`MAX_TOOL_CALLS = 10`: enough to touch all five tool types
+(logs/metrics/deployments/dependencies/search_historical_incidents)
+against the affected service and one hop of dependencies, with room for a
+couple of follow-up/narrower queries, while still bounding cost and
+blocking the "repeatedly query the same thing" runaway-loop failure mode
+the idea doc calls out. This is a real cost/safety control, not a
+decorative constant. The budget is
 enforced *between* turns, not by truncating a turn's tool calls mid-way —
 Claude can request several tool calls in one turn, and the API requires
 every `tool_use` block in a turn to get a matching `tool_result` before
@@ -70,7 +71,8 @@ from sqlalchemy.orm import Session
 from backend.agents.schemas import DiagnosisResult
 from backend.config import get_settings
 from backend.models import Incident
-from backend.tools import build_tools
+from backend.rag.qdrant_client import get_qdrant_client
+from backend.tools import build_rag_tools, build_tools
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +83,17 @@ SYSTEM_PROMPT = """You are an incident investigation agent for a production syst
 You have been handed one incident to investigate. Your job is to determine
 its root_cause_category from a fixed set of categories by gathering real
 evidence with the tools available to you (get_logs, get_metrics,
-get_deployments, get_dependencies). Do not guess without evidence, and do
-not repeatedly call the same tool with the same arguments.
+get_deployments, get_dependencies, search_historical_incidents). Do not
+guess without evidence, and do not repeatedly call the same tool with the
+same arguments.
+
+Once you have gathered enough evidence from logs/metrics/deployments/
+dependencies to describe the incident (its service, symptoms, any recent
+change, any dependency involvement, and a short timeline), consider
+calling search_historical_incidents to check whether this presentation
+matches a past incident -- a real historical match with its similarity
+score and how it was resolved is useful corroborating evidence, not a
+replacement for the evidence you already gathered.
 
 Investigate the affected service's logs, metrics, recent deployments, and
 downstream dependencies around the incident time. Look for a temporally
@@ -219,7 +230,14 @@ def investigate_incident(db: Session, incident: Incident) -> DiagnosisResult:
     tool results) as context. Returns the resulting `DiagnosisResult`.
     """
     settings = get_settings()
-    tools = build_tools(db)
+    # RAG tool bound separately (backend.tools.build_rag_tools) because it
+    # depends on a QdrantClient, not the request-scoped `db: Session` every
+    # other Phase 2 tool needs -- see backend/tools/historical_incidents.py's
+    # docstring. get_qdrant_client() is itself a cached, connection-less
+    # constructor (no network I/O happens until a tool call actually
+    # searches), so adding it here doesn't change this function's
+    # lazy-until-invoked behavior.
+    tools = build_tools(db) + build_rag_tools(get_qdrant_client())
 
     # No temperature/top_p: these models reject sampling params (BUILD_PLAN.md
     # Tech Stack). max_tokens is set explicitly rather than relying on the

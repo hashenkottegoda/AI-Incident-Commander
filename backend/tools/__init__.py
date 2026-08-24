@@ -12,6 +12,12 @@ exists for data we don't have:
 - `get_metrics`     -> `backend.models.MetricPoint` (service, metric_name, time window)
 - `get_deployments` -> `backend.models.Deployment`  (service, time window)
 - `get_dependencies`-> `backend.models.TraceLite`   (service, time window; downstream + duration_ms)
+- `search_historical_incidents` (Phase 4, `backend/tools/historical_incidents.py`)
+  -> Qdrant `historical_incidents` collection (structured incident summary
+  in, ranked historical matches + similarity score out). Bound to a
+  `QdrantClient`, not a `db: Session` -- see `build_rag_tools` below and
+  that module's docstring for why it's a parallel aggregator rather than
+  folded into `build_tools`.
 
 BUILD_PLAN.md's Agent Architecture section also mentions "db-status" and
 "config" in the Investigation node's tool list. There is no separate
@@ -84,6 +90,11 @@ from sqlalchemy.orm import Session
 
 from backend.tools.dependencies import get_dependencies, make_get_dependencies_tool
 from backend.tools.deployments import get_deployments, make_get_deployments_tool
+from backend.tools.historical_incidents import (
+    build_rag_tools,
+    make_search_historical_incidents_tool,
+    search_historical_incidents,
+)
 from backend.tools.logs import get_logs, make_get_logs_tool
 from backend.tools.metrics import get_metrics, make_get_metrics_tool
 from backend.tools.schemas import DeploymentRecord, LogRecord, MetricRecord, TraceRecord
@@ -93,6 +104,7 @@ __all__ = [
     "LogRecord",
     "MetricRecord",
     "TraceRecord",
+    "build_rag_tools",
     "build_tools",
     "get_deployments",
     "get_dependencies",
@@ -102,6 +114,8 @@ __all__ = [
     "make_get_dependencies_tool",
     "make_get_logs_tool",
     "make_get_metrics_tool",
+    "make_search_historical_incidents_tool",
+    "search_historical_incidents",
 ]
 
 

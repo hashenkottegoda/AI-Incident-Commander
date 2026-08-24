@@ -1,0 +1,502 @@
+# Hand-authored historical incident writeups -- RAG seed data for
+# BUILD_PLAN.md Phase 4 ("~20 historical incident writeups ... embed and
+# seed them"). See backend/rag/historical_incidents.py for the validated
+# schema and backend/rag/embeddings.py for exactly which fields get
+# embedded (service/symptoms/recent_changes/observed_dependencies/timeline
+# -- NOT narrative, which is a human-readable resolution note only).
+#
+# Deliberately spans a realistic mix of the 6 root_cause_category values
+# (not one-per-category evenly, and not all one category) and deliberately
+# includes multiple incidents *within* the same category with genuinely
+# different specific symptom combinations/services/causes -- e.g. four
+# separate database_connection_pool stories (undersized pool after a
+# library swap, a connection leak from a missed cleanup path, a
+# long-running transaction from a bulk job, and an upstream retry storm)
+# rather than near-duplicates -- so Recall@K (backend/rag/recall_eval.py)
+# is a meaningful measurement, not trivially perfect (everything's a
+# unique paraphrase) or trivially impossible (everything's indistinguishable).
+
+# --- database_connection_pool (4) -----------------------------------------
+
+- id: hist-001
+  root_cause_category: database_connection_pool
+  service: billing-service
+  symptoms:
+    - db_connection_pool_exhausted
+    - connection_wait_timeouts
+    - invoice_generation_failures
+    - error_rate_spike
+  recent_changes: >-
+    billing-service v3.4.0 deployed 25 minutes prior, switching the invoice
+    job's DB client to a new connection-pooling library with a much lower
+    default max-pool-size than the previous client.
+  observed_dependencies: null
+  timeline: >-
+    Deployment at T; connection pool utilization climbs steadily from T+2m;
+    first connection-wait-timeout errors at T+9m; invoice generation
+    failures spike at T+14m; on-call paged at T+16m.
+  narrative: >-
+    The new pooling library shipped with a much smaller default pool size
+    than the previous client. Under normal invoice-batch load the pool
+    filled within minutes and new requests queued until they timed out.
+    Rolling back to v3.3.x resolved it immediately; a follow-up change
+    explicitly configured pool size instead of relying on the library default.
+
+- id: hist-002
+  root_cause_category: database_connection_pool
+  service: session-service
+  symptoms:
+    - connection_leak_detected
+    - db_connections_high
+    - orm_session_not_closed
+    - slow_login_responses
+  recent_changes: >-
+    session-service v1.12.0 deployed the day before, adding a new
+    "remember me" code path.
+  observed_dependencies: null
+  timeline: >-
+    Gradual, multi-hour climb in active DB connections starting a few hours
+    after the deploy (only triggered when the new code path was exercised);
+    connections never returned to baseline; login latency degraded over
+    roughly 6 hours until the pool was fully saturated.
+  narrative: >-
+    The new "remember me" path opened a DB session but an early-return
+    branch on an edge case (an already-authenticated user hitting the
+    endpoint again) skipped the session's cleanup. Each occurrence leaked
+    one connection permanently. Fixed by wrapping the session lifecycle so
+    cleanup always ran, then restarted to clear the already-leaked connections.
+
+- id: hist-003
+  root_cause_category: database_connection_pool
+  service: catalog-service
+  symptoms:
+    - connection_pool_saturation
+    - long_running_transaction_detected
+    - checkout_facing_latency_spike
+    - db_lock_wait_high
+  recent_changes: null
+  observed_dependencies: null
+  timeline: >-
+    A nightly bulk product-import job began holding a single transaction
+    open for over 40 minutes (previously seconds) after the import
+    dataset size roughly tripled; other services sharing the pool started
+    seeing saturation and lock waits within 20 minutes of the job starting.
+  narrative: >-
+    Root cause was operational, not code: a data ingestion vendor tripled
+    their weekly export size without notice, and the existing bulk-import
+    job wrapped the entire import in one transaction, monopolizing pool
+    connections and holding row locks. Fixed by batching the import into
+    smaller, individually-committed chunks.
+
+- id: hist-004
+  root_cause_category: database_connection_pool
+  service: fulfillment-service
+  symptoms:
+    - connection_pool_exhausted
+    - retry_storm_from_upstream
+    - db_connections_high
+    - order_processing_backlog
+  recent_changes: null
+  observed_dependencies: >-
+    Receives elevated call volume from order-service, which retried
+    aggressively against fulfillment-service after a brief network blip.
+  timeline: >-
+    A transient network blip caused order-service's calls to
+    fulfillment-service to fail for roughly 90 seconds; order-service's
+    retry logic then sent a burst of duplicate requests, each opening a new
+    DB connection, exhausting fulfillment-service's pool within 3 minutes
+    even after the network blip itself resolved.
+  narrative: >-
+    The pool exhaustion was a downstream symptom of an upstream retry
+    storm, not a fulfillment-service defect. Mitigated by temporarily
+    scaling fulfillment-service's pool size, and permanently fixed by
+    adding exponential backoff and a retry-burst cap on order-service.
+
+# --- memory_resource_exhaustion (3) ----------------------------------------
+
+- id: hist-005
+  root_cause_category: memory_resource_exhaustion
+  service: search-service
+  symptoms:
+    - memory_usage_climbing
+    - gc_pause_increase
+    - oom_kill_event
+    - search_latency_degrading
+  recent_changes: null
+  observed_dependencies: null
+  timeline: >-
+    Memory usage climbed steadily over roughly 18 hours with no single
+    trigger; GC pause times rose in step; the process was OOM-killed once
+    memory crossed roughly 95% of the container limit; search latency
+    visibly degraded in the final hour before the kill.
+  narrative: >-
+    An in-process query-result cache had no eviction policy or TTL, so
+    every unique search query permanently grew the cache. Restarting
+    temporarily freed memory but the leak recurred on the same schedule.
+    Fixed by adding an LRU eviction policy with a bounded cache size.
+
+- id: hist-006
+  root_cause_category: memory_resource_exhaustion
+  service: recommendation-service
+  symptoms:
+    - memory_usage_climbing
+    - gc_pause_increase
+    - request_queue_backup
+    - no_recent_deployment
+  recent_changes: null
+  observed_dependencies: null
+  timeline: >-
+    Memory grew in a sawtooth pattern that trended upward over several
+    days; each GC cycle reclaimed less than the previous one; request queue
+    depth grew as GC pauses lengthened, eventually causing request timeouts.
+  narrative: >-
+    A background model-refresh job held a reference to the previous model
+    version in a module-level list that was only ever appended to, never
+    cleared. Each hourly refresh added another full model to memory. Fixed
+    by replacing the list with a single mutable reference.
+
+- id: hist-007
+  root_cause_category: memory_resource_exhaustion
+  service: notifications-service
+  symptoms:
+    - memory_usage_climbing
+    - oom_kill_event
+    - message_delivery_failures
+    - worker_restarts_increasing
+  recent_changes: >-
+    notifications-service v4.1.0 deployed two days prior, adding batch
+    digest emails.
+  observed_dependencies: null
+  timeline: >-
+    Memory usage per worker climbed roughly linearly with the number of
+    digest batches processed since the deploy; workers began hitting their
+    memory limit and getting OOM-killed after about 2 days of accumulated
+    batches, causing intermittent message delivery failures during restarts.
+  narrative: >-
+    A deployment was in the recent history, but the leak itself was a
+    genuine in-process accumulation bug, not something rollback alone
+    conclusively fixed: the new digest feature accumulated recipient lists
+    in a shared, never-cleared batch buffer across runs. Rolling back
+    stopped new leakage but a code fix (clearing the buffer per batch) was
+    needed to be conclusive.
+
+# --- application_bug (4) ----------------------------------------------------
+
+- id: hist-008
+  root_cause_category: application_bug
+  service: notifications-service
+  symptoms:
+    - error_rate_spike
+    - http_500_spike
+    - null_pointer_exception
+    - deployment_immediately_preceding
+  recent_changes: >-
+    notifications-service v2.0.5 deployed 6 minutes before the error spike began.
+  observed_dependencies: null
+  timeline: >-
+    Deploy completes; error rate jumps from baseline within 2 minutes and
+    continues climbing; nearly all errors share the same stack trace (a
+    null-pointer/attribute error) in the new template-rendering code path
+    introduced by the deploy.
+  narrative: >-
+    The new email-template renderer assumed a user-preferences field was
+    always populated; for accounts created before that field existed, it
+    was null and the renderer crashed. Rolled back immediately; the actual
+    fix added a null-check/default before re-deploying.
+
+- id: hist-009
+  root_cause_category: application_bug
+  service: cart-service
+  symptoms:
+    - error_rate_spike
+    - checkout_failures
+    - deployment_immediately_preceding
+    - stack_trace_in_new_code_path
+  recent_changes: >-
+    cart-service v1.9.2 deployed 10 minutes prior, changing the
+    discount-code validation logic.
+  observed_dependencies: null
+  timeline: >-
+    Errors begin within 3 minutes of deployment, tightly clustered rather
+    than gradually ramping; all failures trace to carts containing more
+    than one discount code, a case the new validation logic didn't handle.
+  narrative: >-
+    A refactor of discount-code validation introduced an assumption that
+    only one discount code could be applied per cart, throwing an
+    unhandled exception whenever a second code was present. Rollback
+    resolved it immediately; the fix added explicit multi-code handling.
+
+- id: hist-010
+  root_cause_category: application_bug
+  service: recommendation-service
+  symptoms:
+    - error_rate_spike
+    - empty_response_payloads
+    - deployment_immediately_preceding
+    - no_resource_pressure
+  recent_changes: >-
+    recommendation-service v3.0.0 deployed 15 minutes prior, migrating the
+    ranking model's serialization format.
+  observed_dependencies: null
+  timeline: >-
+    Errors begin abruptly right after deploy; CPU/memory/DB metrics stay
+    flat at baseline throughout (ruling out resource pressure); nearly all
+    failing requests return an empty payload rather than a 500, traced to a
+    version mismatch in the model deserialization step.
+  narrative: >-
+    The new serialization format wasn't backward-compatible with the model
+    artifact still cached on some instances, so those instances silently
+    returned empty recommendation lists instead of erroring loudly. Rolled
+    back; the actual fix added a serialization-version check with a hard
+    failure instead of a silent empty response.
+
+- id: hist-011
+  root_cause_category: application_bug
+  service: billing-service
+  symptoms:
+    - incorrect_charge_amounts
+    - error_rate_flat
+    - deployment_immediately_preceding
+    - customer_reported_issue
+  recent_changes: >-
+    billing-service v2.7.1 deployed the previous day, changing
+    currency-rounding logic.
+  observed_dependencies: null
+  timeline: >-
+    No error-rate or latency anomaly at all -- the system reported success
+    throughout; the only signal was a cluster of customer-reported
+    incorrect charge amounts starting the day after deploy, later confirmed
+    against transaction logs.
+  narrative: >-
+    A rounding-logic change correctly handled USD but truncated instead of
+    rounding for a subset of non-USD currencies, silently producing charges
+    off by a cent in one direction. Because nothing errored, this was
+    caught by customer reports and a manual transaction audit, not
+    automated monitoring. Rolled back and added currency-specific
+    rounding tests.
+
+# --- upstream_dependency_failure (3) ---------------------------------------
+
+- id: hist-012
+  root_cause_category: upstream_dependency_failure
+  service: cart-service
+  symptoms:
+    - shipping_provider_error_responses
+    - checkout_dependency_errors
+    - feature_flag_recently_enabled
+    - checkout_failures
+  recent_changes: null
+  observed_dependencies: >-
+    cart-service calls shipping-service, which calls an external
+    shipping-rate provider behind a newly-enabled canary flag.
+  timeline: >-
+    A canary flag routing a subset of shipping-rate lookups to a new
+    provider is enabled at T; that provider begins returning error
+    responses (not timeouts) within minutes; shipping-service surfaces
+    those as dependency errors to cart-service, which then fails checkout
+    for affected carts.
+  narrative: >-
+    The new shipping-rate provider had a misconfigured API key for a
+    subset of regions, causing outright error responses. Disabling the
+    canary flag rerouted traffic back to the stable provider and resolved
+    it immediately; no code rollback was needed since the fault was
+    entirely in the external provider path.
+
+- id: hist-013
+  root_cause_category: upstream_dependency_failure
+  service: search-service
+  symptoms:
+    - inventory_service_error_responses
+    - search_result_failures
+    - no_recent_deployment
+    - third_party_status_page_confirms_outage
+  recent_changes: null
+  observed_dependencies: >-
+    search-service calls inventory-service for real-time stock counts.
+  timeline: >-
+    inventory-service begins returning 5xx error responses (not slow, just
+    failing) for a subset of endpoints; search-service's stock-count
+    enrichment step fails on every request that needs it, degrading search
+    result completeness; inventory-service's own status page later confirms
+    a database failover event.
+  narrative: >-
+    The failure originated entirely in inventory-service's infrastructure
+    (a failed database failover), external to search-service. search-service's
+    fix was defensive: add a fallback to serve search results without live
+    stock counts rather than failing the whole request when the dependency errors.
+
+- id: hist-014
+  root_cause_category: upstream_dependency_failure
+  service: fulfillment-service
+  symptoms:
+    - carrier_api_error_responses
+    - shipment_creation_failures
+    - no_recent_deployment
+    - elevated_5xx_from_dependency
+  recent_changes: null
+  observed_dependencies: >-
+    fulfillment-service calls an external carrier API to generate
+    shipping labels.
+  timeline: >-
+    The external carrier API begins returning error responses for
+    label-creation calls with no change on fulfillment-service's side;
+    shipment creation failures track 1:1 with the carrier API's error rate;
+    the carrier's own incident page confirms a regional outage roughly 10
+    minutes after the first internal errors.
+  narrative: >-
+    Purely an external dependency failure. Mitigated by failing over to a
+    secondary carrier integration that was already implemented but
+    normally inactive; no fix was needed on fulfillment-service's own code
+    once the primary carrier's outage resolved.
+
+# --- inefficient_database_query (3) -----------------------------------------
+
+- id: hist-015
+  root_cause_category: inefficient_database_query
+  service: catalog-service
+  symptoms:
+    - catalog_query_latency_high
+    - slow_query_detected
+    - db_cpu_high
+    - request_timeouts
+  recent_changes: null
+  observed_dependencies: null
+  timeline: >-
+    Query latency for a specific product-filter endpoint climbs gradually
+    over several days as the product catalog grows; DB CPU utilization
+    tracks the same climb; once catalog size crossed a threshold, the
+    endpoint started timing out under normal traffic.
+  narrative: >-
+    The filter endpoint's query had no index on the newly-popular filter
+    column, so it fell back to a sequential scan that got linearly slower
+    as the table grew. No executor action fixes this -- it needed an actual
+    index added and the query plan reviewed, a manual schema change outside
+    the standard remediation palette.
+
+- id: hist-016
+  root_cause_category: inefficient_database_query
+  service: billing-service
+  symptoms:
+    - invoice_query_latency_high
+    - db_connection_queue_growth
+    - slow_query_detected
+    - batch_job_duration_increasing
+  recent_changes: null
+  observed_dependencies: null
+  timeline: >-
+    The monthly invoice-reconciliation batch job's runtime grew steadily
+    month over month as transaction volume grew; on the affected run,
+    queries began queuing for available DB connections because each query
+    itself ran far longer than before, eventually causing the batch job to
+    miss its window.
+  narrative: >-
+    A join across three large tables lacked a covering index for the
+    reconciliation query's filter conditions. This wasn't a connection-pool
+    sizing problem even though connections queued -- the real fix was
+    adding the missing index and rewriting the join order, not scaling
+    the pool.
+
+- id: hist-017
+  root_cause_category: inefficient_database_query
+  service: session-service
+  symptoms:
+    - login_query_latency_high
+    - db_cpu_high
+    - slow_query_detected
+    - no_recent_deployment
+  recent_changes: null
+  observed_dependencies: null
+  timeline: >-
+    Login latency rises sharply after a marketing campaign drives a large
+    spike in new-account creation; the session-lookup query, which scans by
+    a non-indexed "last_login" column for a fraud-check step, gets
+    progressively slower as the sessions table grows past its usual size.
+  narrative: >-
+    The fraud-check query used a column with no index, and normally-small
+    table sizes had hidden the cost. The traffic spike from the campaign
+    exposed it. Fixed with an index and a query rewrite; increasing
+    connection pool size (tried first as a stopgap) did not help since each
+    query was still individually slow.
+
+# --- upstream_dependency_timeout (3) -----------------------------------------
+
+- id: hist-018
+  root_cause_category: upstream_dependency_timeout
+  service: checkout-service
+  symptoms:
+    - payment_gateway_latency_high
+    - payment_gateway_timeout_errors
+    - retry_storm_detected
+    - db_connections_high
+    - checkout_failures
+  recent_changes: null
+  observed_dependencies: >-
+    checkout-service calls an external payment gateway; checkout-service
+    retries aggressively on timeout.
+  timeline: >-
+    The external payment gateway's response time climbs from roughly
+    200ms to several seconds; checkout-service's retry-on-timeout logic
+    fires repeatedly for each slow call, driving up outbound call volume
+    and, indirectly, DB connection usage as retried requests pile up;
+    checkout failures spike once the gateway's own capacity is overwhelmed
+    by the retry volume.
+  narrative: >-
+    The loudest visible symptom was database connection pressure on
+    checkout-service, which could be mistaken for a pool-sizing problem.
+    The actual root cause was upstream: the payment gateway degraded, and
+    checkout's own retry behavior amplified the problem into a retry
+    storm. Disabling the aggressive-retry feature flag (failing fast
+    instead) resolved it; scaling the DB pool was tried first and made no
+    difference.
+
+- id: hist-019
+  root_cause_category: upstream_dependency_timeout
+  service: cart-service
+  symptoms:
+    - tax_service_latency_high
+    - tax_service_timeout_errors
+    - checkout_latency_spike
+    - no_recent_deployment
+  recent_changes: null
+  observed_dependencies: >-
+    cart-service calls an internal tax-calculation service synchronously
+    during checkout.
+  timeline: >-
+    The tax-calculation service's p99 latency climbs from roughly 150ms to
+    several seconds during a period of unrelated load on its own database;
+    cart-service's synchronous call to it means checkout latency rises in
+    lockstep; a fraction of checkout requests eventually time out waiting
+    on the tax call.
+  narrative: >-
+    cart-service had no timeout or fallback around the synchronous
+    tax-service call, so a slowdown in a dependency it didn't own directly
+    degraded checkout. Root cause was traced to tax-service's own database,
+    but cart-service's fix was to add a bounded timeout with a
+    cached-rate fallback so a future dependency slowdown wouldn't cascade
+    the same way.
+
+- id: hist-020
+  root_cause_category: upstream_dependency_timeout
+  service: search-service
+  symptoms:
+    - inventory_service_latency_high
+    - inventory_lookup_timeout_errors
+    - search_result_degradation
+    - no_recent_deployment
+  recent_changes: null
+  observed_dependencies: >-
+    search-service calls inventory-service synchronously to enrich results
+    with live stock counts.
+  timeline: >-
+    inventory-service's p99 latency climbs over roughly 30 minutes (traced
+    separately to a slow query on inventory-service's own side);
+    search-service's synchronous enrichment calls to it start timing out;
+    search results degrade to stale/missing stock counts, and overall
+    search latency rises.
+  narrative: >-
+    The proximate trigger was inventory-service's own slow query, but from
+    search-service's perspective this presented purely as an upstream
+    dependency timeout. Fixed on search-service's side by making the
+    stock-count enrichment call asynchronous/non-blocking with a fallback,
+    so inventory-service's latency no longer directly propagates into
+    search latency.
