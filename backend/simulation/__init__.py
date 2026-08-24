@@ -10,9 +10,10 @@ BUILD_PLAN.md Phase 1's simulation layer:
   into a temporally coherent anomaly timeline and creates the `Incident`
   row. `backend/api/simulation.py` is the thin HTTP wrapper around it
   (`POST /api/simulation/failure`, `POST /api/simulation/reset`).
-
-Still to come: the `--count N --seed S` eval-dataset-scale batch generator
-that reuses `inject_failure()` in a loop.
+- `dataset.py` — `generate_dataset()`: the `--count N --seed S` seeded
+  batch generator that reuses `inject_failure()` in a loop, so the eval
+  dataset scales from ~30 (dev) to 100+ (portfolio) deterministically.
+  `backend/scripts/generate_dataset.py` is its CLI wrapper.
 """
 
 from __future__ import annotations
