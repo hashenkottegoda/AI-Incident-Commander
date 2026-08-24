@@ -8,13 +8,17 @@ cascading_payment_timeout (via the evidence-sufficiency path even if
 confidences cluster)."*
 
 No test in this module makes a real Claude/Anthropic API call: `ChatAnthropic`
-is monkeypatched separately in each of the three LLM-calling node modules
-(`triage_node`, `investigation_node`, `root_cause_node`) with a small fake
-chain of responses -- Triage confirms the service, Investigation calls
-tools (real tool execution against real seeded Postgres data -- only the
-LLM layer is faked) then stops, Root Cause returns a structured diagnosis --
-exactly the "mock chain of fake LLM responses" pattern this task calls for,
-following `tests/test_rag.py`'s `_FakeChatAnthropic` convention.
+is monkeypatched separately in each of the four LLM-calling node modules
+(`triage_node`, `investigation_node`, `root_cause_node`,
+`response_planner_node`) with a small fake chain of responses -- Triage
+confirms the service, Investigation calls tools (real tool execution
+against real seeded Postgres data -- only the LLM layer is faked) then
+stops, Root Cause returns a structured diagnosis, and Response Planner
+(Phase 6 -- the graph now continues past Root Cause, see `backend/graph.py`)
+returns a single canned SAFE action so these Phase 5-focused tests aren't
+otherwise affected by Phase 6's routing -- exactly the "mock chain of fake
+LLM responses" pattern this task calls for, following `tests/test_rag.py`'s
+`_FakeChatAnthropic` convention.
 
 The fakes are deliberately pass-aware (first vs. second Investigation/Root
 Cause visit) so this test can prove the conditional re-investigation loop
@@ -38,6 +42,7 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
+from backend.agents.response_schemas import ResponseAction, ResponsePlan
 from backend.agents.schemas import DiagnosisResult, Hypothesis
 from backend.config import get_settings
 from backend.db import SessionLocal
@@ -230,6 +235,29 @@ def _make_fake_root_cause_chat_anthropic(counter: _RootCausePassCounter):
     return _FakeRootCauseChatAnthropic
 
 
+class _FakeResponsePlannerChatAnthropic:
+    """Phase 6's Response Planner node now runs immediately after Root
+    Cause in the full graph (see `backend/graph.py`) -- these Phase
+    5-focused tests aren't about the response side, so this fake always
+    proposes a single, uncontroversial SAFE action (never a live API call)."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def with_structured_output(self, schema):  # noqa: ARG002
+        plan = ResponsePlan(
+            actions=[
+                ResponseAction(
+                    action_type="generate_incident_report",
+                    expected_benefit="documents the diagnosis for the record",
+                    confidence=0.7,
+                    llm_risk_assessment="no risk, read-only",
+                )
+            ]
+        )
+        return _FakeStructuredLLM(plan)
+
+
 # --- Shared incident fixture ------------------------------------------------
 
 
@@ -244,6 +272,7 @@ def _inject_cascading_incident(db):
 
 def _patch_all_fakes(monkeypatch, service, start, end):
     import backend.agents.investigation_node as investigation_module
+    import backend.agents.response_planner_node as response_planner_module
     import backend.agents.root_cause_node as rca_module
     import backend.agents.triage_node as triage_module
 
@@ -259,6 +288,9 @@ def _patch_all_fakes(monkeypatch, service, start, end):
     monkeypatch.setattr(
         rca_module, "ChatAnthropic", _make_fake_root_cause_chat_anthropic(rca_counter)
     )
+    monkeypatch.setattr(
+        response_planner_module, "ChatAnthropic", _FakeResponsePlannerChatAnthropic
+    )
     return investigation_counter, rca_counter
 
 
@@ -266,7 +298,16 @@ def _patch_all_fakes(monkeypatch, service, start, end):
 
 
 async def test_full_graph_triggers_reinvestigation_loop_on_cascading_scenario(monkeypatch):
+    """Phase 6's Response Planner node commits real `AuditEvent`/incident
+    rows mid-graph (see `backend.agents.response_planner_node`) -- unlike
+    Phase 5, `db.rollback()` alone no longer discards everything this test
+    injects, so cleanup goes through `/api/simulation/reset` before and
+    after, same as `test_investigate_graph_endpoint_...` below."""
     from backend.graph import run_incident_graph
+    from backend.main import app
+
+    client = TestClient(app)
+    client.post("/api/simulation/reset")
 
     db = SessionLocal()
     try:
@@ -299,10 +340,18 @@ async def test_full_graph_triggers_reinvestigation_loop_on_cascading_scenario(mo
         assert final_state.hypotheses
         assert final_state.hypotheses[0].category == "upstream_dependency_timeout"
         assert final_state.alternative_hypotheses
-        assert final_state.incident_status == IncidentStatus.DIAGNOSED
+        # The graph now continues past Root Cause into Phase 6's Response
+        # Planner (see backend/graph.py) -- the fake planner always proposes
+        # a single SAFE action, so the placeholder terminal status is
+        # EXECUTING, not DIAGNOSED (which is now only a transient status set
+        # mid-graph by the Root Cause node).
+        assert final_state.incident_status == IncidentStatus.EXECUTING
+        assert len(final_state.recommended_actions) == 1
+        assert final_state.recommended_actions[0]["action_type"] == "generate_incident_report"
     finally:
         db.rollback()
         db.close()
+        client.post("/api/simulation/reset")
 
 
 async def test_full_graph_evidence_grounded_in_real_tool_calls(monkeypatch):
@@ -310,6 +359,10 @@ async def test_full_graph_evidence_grounded_in_real_tool_calls(monkeypatch):
     real seeded incident data is real, so evidence descriptions should
     reflect actually-returned records, not placeholder text."""
     from backend.graph import run_incident_graph
+    from backend.main import app
+
+    client = TestClient(app)
+    client.post("/api/simulation/reset")
 
     db = SessionLocal()
     try:
@@ -331,6 +384,7 @@ async def test_full_graph_evidence_grounded_in_real_tool_calls(monkeypatch):
     finally:
         db.rollback()
         db.close()
+        client.post("/api/simulation/reset")
 
 
 def test_investigate_graph_endpoint_returns_ranked_hypotheses_and_alternatives(monkeypatch):

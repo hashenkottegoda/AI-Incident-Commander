@@ -23,7 +23,7 @@ from backend.models.incident import IncidentStatus, Severity
 from backend.rag.qdrant_client import get_qdrant_client
 from backend.scripts.setup_checkpointer import to_psycopg_dsn
 
-EXPECTED_NODES = {"triage", "investigation", "rag", "root_cause"}
+EXPECTED_NODES = {"triage", "investigation", "rag", "root_cause", "response_planner"}
 
 
 def _postgres_reachable() -> bool:
@@ -58,22 +58,23 @@ def test_all_expected_nodes_present(db):
 
 
 def test_linear_edges_match_build_plan_flow(db):
-    """Triage -> Investigation -> RAG -> Root Cause, in that fixed order --
-    BUILD_PLAN.md's graph-flow diagram."""
+    """Triage -> Investigation -> RAG -> Root Cause -> Response Planner, in
+    that fixed order -- BUILD_PLAN.md's graph-flow diagram."""
     compiled = _compiled(db)
     edges = {(e.source, e.target) for e in compiled.get_graph().edges if not e.conditional}
     assert (START, "triage") in edges
     assert ("triage", "investigation") in edges
     assert ("investigation", "rag") in edges
     assert ("rag", "root_cause") in edges
+    assert ("response_planner", END) in edges
 
 
-def test_conditional_edges_from_root_cause_go_to_investigation_and_end(db):
+def test_conditional_edges_from_root_cause_go_to_investigation_and_response_planner(db):
     compiled = _compiled(db)
     conditional_targets = {
         e.target for e in compiled.get_graph().edges if e.conditional and e.source == "root_cause"
     }
-    assert conditional_targets == {"investigation", END}
+    assert conditional_targets == {"investigation", "response_planner"}
 
 
 def test_investigation_is_not_a_dead_end_it_has_an_incoming_loop_edge(db):

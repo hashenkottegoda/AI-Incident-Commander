@@ -1,15 +1,23 @@
-"""Phase 5's `StateGraph` assembly: nodes, conditional edges, Postgres
+"""Phase 5/6's `StateGraph` assembly: nodes, conditional edges, Postgres
 checkpointer.
 
 BUILD_PLAN.md Phase 5: *"Build the StateGraph: Triage -> Investigation loop
 -> RAG -> Root Cause/Hypothesis -> conditional re-investigation loop back to
-Investigation."* This is the full investigation half of Experiment D
-(response/remediation is Phase 6 and not built here).
+Investigation."* Phase 6 continues the same graph past Root Cause: *"RESPONSE
+PLANNER ... -> RISK CLASSIFIER ... -> SAFE -> ACTION EXECUTOR ... HIGH-IMPACT
+-> HUMAN APPROVAL."* This module currently builds through the Response
+Planner + (inline) Risk Classifier only -- the Action Executor and the real
+`interrupt()`-based Human Approval gate are later Phase 6 sub-steps not
+built here (see `backend.agents.response_planner_node`'s docstring for the
+placeholder terminal states used in the meantime).
 
 ```
-START -> triage -> investigation -> rag -> root_cause -+-> END (diagnosed)
-                        ^                               |
-                        +---- (reinvestigate) ----------+
+START -> triage -> investigation -> rag -> root_cause -+-> response_planner -> END
+                        ^                               |    (incident_status =
+                        +---- (reinvestigate) ----------+     EXECUTING | AWAITING_APPROVAL,
+                                                                a placeholder terminal state
+                                                                until the Action Executor /
+                                                                real approval interrupt() exist)
 ```
 
 `build_incident_graph` returns the **uncompiled** `StateGraph` -- callers
@@ -30,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from backend.agents.investigation_node import make_investigation_node
 from backend.agents.rag_node import make_rag_node
+from backend.agents.response_planner_node import make_response_planner_node
 from backend.agents.root_cause_node import make_root_cause_node
 from backend.agents.routing import route_after_root_cause
 from backend.agents.state import IncidentState
@@ -63,6 +72,7 @@ def build_incident_graph(db: Session, qdrant_client: QdrantClient | None = None)
     graph.add_node("investigation", make_investigation_node(db))
     graph.add_node("rag", make_rag_node(qdrant_client))
     graph.add_node("root_cause", make_root_cause_node())
+    graph.add_node("response_planner", make_response_planner_node(db))
 
     graph.add_edge(START, "triage")
     graph.add_edge("triage", "investigation")
@@ -71,8 +81,14 @@ def build_incident_graph(db: Session, qdrant_client: QdrantClient | None = None)
     graph.add_conditional_edges(
         "root_cause",
         route_after_root_cause,
-        {"reinvestigate": "investigation", "end": END},
+        {"reinvestigate": "investigation", "end": "response_planner"},
     )
+    # response_planner is Phase 6's current terminal node: it sets
+    # incident_status to a placeholder (EXECUTING for an all-SAFE plan,
+    # AWAITING_APPROVAL if any HIGH_IMPACT action was proposed) and the
+    # graph ends there until the Action Executor / real approval
+    # interrupt() exist (see this node's own docstring).
+    graph.add_edge("response_planner", END)
     return graph
 
 
