@@ -3,11 +3,15 @@ pattern through Phase 6's Response Planner + inline Risk Classifier node.
 
 Proves the full graph, given a diagnosed root cause:
 
-(a) routes an all-SAFE response plan to the `EXECUTING` placeholder
-    terminal state and creates an `AUTO_EXECUTED` `AuditEvent` row, and
+(a) routes an all-SAFE response plan through the real Action Executor
+    (`backend.agents.action_executor_node`) to the `DIAGNOSED` terminal
+    state (nothing left to verify -- see that module's docstring) and
+    leaves the `AuditEvent` row `EXECUTED` (auto-executed, no human
+    decision needed), and
 (b) routes a plan containing a HIGH_IMPACT action (`rollback_deployment`
-    for `db_connection_exhaustion`) to the `AWAITING_APPROVAL` placeholder
-    terminal state and creates a `PENDING_APPROVAL` `AuditEvent` row with
+    for `db_connection_exhaustion`) to the `AWAITING_APPROVAL` terminal
+    state (still genuinely paused at `interrupt()` -- this test never
+    approves it) and creates a `PENDING_APPROVAL` `AuditEvent` row with
     `approver` still null.
 
 No test in this module makes a real Claude/Anthropic API call:
@@ -207,7 +211,7 @@ def _inject_db_connection_exhaustion_incident(db):
 # --- Tests ---------------------------------------------------------------
 
 
-async def test_safe_only_plan_routes_to_executing_with_auto_executed_audit_row(monkeypatch):
+async def test_safe_only_plan_routes_to_diagnosed_with_executed_audit_row(monkeypatch):
     from backend.graph import run_incident_graph
     from backend.main import app
 
@@ -231,7 +235,11 @@ async def test_safe_only_plan_routes_to_executing_with_auto_executed_audit_row(m
 
         final_state = await run_incident_graph(db, incident, qdrant_client=get_qdrant_client())
 
-        assert final_state.incident_status == IncidentStatus.EXECUTING
+        # A SAFE-only plan never touches human_approval -- it runs straight
+        # through the real Action Executor to DIAGNOSED (nothing left to
+        # verify, see action_executor_node's docstring for why DIAGNOSED is
+        # the closest lifecycle fit).
+        assert final_state.incident_status == IncidentStatus.DIAGNOSED
         assert len(final_state.recommended_actions) == 1
         ref = final_state.recommended_actions[0]
         assert ref["action_type"] == "gather_additional_diagnostics"
@@ -250,9 +258,10 @@ async def test_safe_only_plan_routes_to_executing_with_auto_executed_audit_row(m
             event = events[0]
             assert event.action_type == "gather_additional_diagnostics"
             assert event.risk_classification is RiskClassification.SAFE
-            assert event.decision_status is AuditDecisionStatus.AUTO_EXECUTED
+            assert event.decision_status is AuditDecisionStatus.EXECUTED
             assert event.approver is None
-            assert event.executed_at is None
+            assert event.executed_at is not None
+            assert event.execution_outcome is None  # SAFE actions have no recovery outcome
         finally:
             fresh_db.close()
     finally:

@@ -341,11 +341,13 @@ async def test_full_graph_triggers_reinvestigation_loop_on_cascading_scenario(mo
         assert final_state.hypotheses[0].category == "upstream_dependency_timeout"
         assert final_state.alternative_hypotheses
         # The graph now continues past Root Cause into Phase 6's Response
-        # Planner (see backend/graph.py) -- the fake planner always proposes
-        # a single SAFE action, so the placeholder terminal status is
-        # EXECUTING, not DIAGNOSED (which is now only a transient status set
-        # mid-graph by the Root Cause node).
-        assert final_state.incident_status == IncidentStatus.EXECUTING
+        # Planner, then the real Action Executor (see backend/graph.py) --
+        # the fake planner always proposes a single SAFE action, which the
+        # Action Executor auto-executes with nothing left to verify, so the
+        # real terminal status is DIAGNOSED (see action_executor_node's
+        # docstring for why that's the closest lifecycle fit for "a purely
+        # informational action ran and nothing else is pending").
+        assert final_state.incident_status == IncidentStatus.DIAGNOSED
         assert len(final_state.recommended_actions) == 1
         assert final_state.recommended_actions[0]["action_type"] == "generate_incident_report"
     finally:

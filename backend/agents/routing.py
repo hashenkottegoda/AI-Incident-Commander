@@ -161,10 +161,45 @@ def route_after_response_planner(state: IncidentState) -> str:
 
     Returns "human_approval" (routes to the `interrupt()` gate) when any
     action was classified HIGH_IMPACT; otherwise "end" -- an all-SAFE plan
-    has nothing for a human to approve, so the graph ends right after
-    `response_planner_node` today (the not-yet-built Action Executor's
-    SAFE-branch entry point, per BUILD_PLAN.md's graph diagram).
+    has nothing for a human to approve, so `backend/graph.py` wires this
+    "end" straight to `action_executor` (never through `human_approval`),
+    per BUILD_PLAN.md's graph diagram.
     """
     if state.incident_status is IncidentStatus.AWAITING_APPROVAL:
         return "human_approval"
+    return "end"
+
+
+def route_after_action_executor(state: IncidentState) -> str:
+    """LangGraph conditional-edge callback for the ACTION EXECUTOR node.
+
+    `action_executor_node` sets `incident_status` to `VERIFYING` when it
+    just executed at least one HIGH_IMPACT remediation (something the
+    Recovery Check needs to verify against telemetry), or `DIAGNOSED` for
+    an all-SAFE plan (nothing to verify -- see that module's docstring for
+    why `DIAGNOSED` is the closest existing lifecycle fit). Returns
+    "recovery_check" in the former case, "end" in the latter.
+    """
+    if state.incident_status is IncidentStatus.VERIFYING:
+        return "recovery_check"
+    return "end"
+
+
+def route_after_recovery_check(state: IncidentState) -> str:
+    """LangGraph conditional-edge callback for the RECOVERY CHECK node.
+
+    `recovery_check_node` already applies the bounded re-investigation
+    loop's own budget (`state.investigation_iterations` vs.
+    `MAX_REINVESTIGATION_LOOPS` -- the SAME field/constant
+    `route_after_root_cause` uses, not a second parallel bound) and sets
+    `incident_status` to exactly one of `RESOLVED` (recovered),
+    `MANUAL_INTERVENTION_REQUIRED` (still degraded, budget exhausted), or
+    `INVESTIGATING` (still degraded, budget remains -- loop back for a
+    fresh Investigation pass). This router just reads that decision, the
+    same pattern `route_after_response_planner` already uses against
+    `response_planner_node`'s output: "end" for the two terminal states,
+    "investigation" to loop back.
+    """
+    if state.incident_status is IncidentStatus.INVESTIGATING:
+        return "investigation"
     return "end"

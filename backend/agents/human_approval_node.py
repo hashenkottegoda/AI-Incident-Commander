@@ -52,17 +52,31 @@ payload into `IncidentState` so the rest of the graph (and tests
 inspecting the final state) can see what happened without a second
 database round trip.
 
-## The placeholder below `interrupt()`
+## What happens below `interrupt()`
 
-Everything after `interrupt()` returns is a **placeholder** for the real
-Action Executor (the next Phase 6 sub-step, explicitly out of scope
-here): on an approved resume it just sets `incident_status = EXECUTING`
-and lets the graph end. There is no re-execution-safety concern with this
-placeholder itself (or the future real executor code that replaces it):
+On an approved resume, this node just records `approval_decision =
+"approved"` and hands control to `backend/graph.py`'s unconditional
+`human_approval -> action_executor` edge -- the real Action Executor
+(`backend.agents.action_executor_node`) runs immediately after, reading
+the now-`APPROVED` `AuditEvent` row(s) `backend.api.approvals` committed
+before issuing the resume. There is no re-execution-safety concern with
+this node's own code (it does nothing but read state below `interrupt()`):
 it only runs once `interrupt()` has already returned a resume value on
 this pass, and (per this module's own design) this node is only ever
 resumed once per incident -- see `backend.api.approvals`'s idempotency
-guard for why a second `/approve` call never reaches this node again.
+guard for why a second `/approve` call never reaches this node again, and
+`action_executor_node`'s own idempotency guard (only `APPROVED`/
+`AUTO_EXECUTED` rows are actionable) for why a replayed pass through this
+node can never cause a second execution either.
+
+The defensive non-approved fallback branch below is never exercised by the
+real API flow (`POST /reject` never resumes the graph at all -- see
+`backend.api.approvals`'s docstring), but stays correct even if hit: it
+sets `incident_status = MANUAL_INTERVENTION_REQUIRED` without ever putting
+the corresponding `AuditEvent` row into `APPROVED`, so `action_executor_node`
+(which only acts on `APPROVED`/`AUTO_EXECUTED` rows) finds nothing to
+execute for it even though the graph's unconditional edge still visits
+that node.
 """
 
 from __future__ import annotations
@@ -104,10 +118,13 @@ def human_approval_node(state: IncidentState) -> dict[str, Any]:
     if decision_value == "approved":
         return {
             "approval_decision": "approved",
-            # Placeholder post-approval terminal state -- the next Phase 6
-            # sub-step (Action Executor) replaces this literal assignment
-            # with a real node/edge; the graph currently just ends here
-            # either way (see backend/graph.py).
+            # Real (not placeholder) transitional state now: the graph's
+            # unconditional human_approval -> action_executor edge
+            # (backend/graph.py) runs immediately after this, which
+            # overwrites incident_status to VERIFYING (HIGH_IMPACT
+            # remediation just executed, pending Recovery Check) or
+            # DIAGNOSED (shouldn't happen on this branch -- reaching
+            # human_approval at all implies a HIGH_IMPACT action existed).
             "incident_status": IncidentStatus.EXECUTING,
         }
     # Defensive fallback only: in the actual approval flow this graph is

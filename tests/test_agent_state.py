@@ -68,8 +68,8 @@ def test_full_field_set_round_trips_through_model_dump_and_validate():
         ],
         recommended_actions=[{"action": "rollback_deployment", "risk": "high"}],
         approval_decision="approved",
-        execution_result_id=99,
-        recovery_result="resolved",
+        execution_result_id=[99, 100],
+        recovery_result={"outcome": "recovered", "checked_metrics": {"error_rate": 0.004}},
         investigation_iterations=1,
     )
     dumped = state.model_dump(mode="json")

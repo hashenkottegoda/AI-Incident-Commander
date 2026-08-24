@@ -87,8 +87,20 @@ class IncidentState(BaseModel):
     # concern (safe-vs-high-impact rule table etc.), not this phase's.
     recommended_actions: list[dict[str, Any]] = Field(default_factory=list)
     approval_decision: str | None = None
-    execution_result_id: int | None = None
-    recovery_result: str | None = None
+    # `int | list[int]` (not just `int`): the Action Executor (this
+    # sub-step's `backend.agents.action_executor_node`) can execute more
+    # than one `AuditEvent` in a single pass (e.g. a multi-action response
+    # plan), so this needs to carry either one id or a compact list of ids
+    # -- still "a reference, not bulk data" per this module's own framing,
+    # just no longer assumed to be exactly one row.
+    execution_result_id: int | list[int] | None = None
+    # `dict[str, Any]` (not `str`): the Recovery Check node
+    # (`backend.agents.recovery_check_node`) needs to carry a small
+    # structured summary -- outcome + which metrics were checked + their
+    # before/after values -- not a single free-text label. Still "compact
+    # reasoning state, not bulk data" (this holds a handful of scalar
+    # before/after values per metric, never raw metric series).
+    recovery_result: dict[str, Any] | None = None
 
     # --- Re-investigation loop bookkeeping (see module docstring) -------
     investigation_iterations: int = 0

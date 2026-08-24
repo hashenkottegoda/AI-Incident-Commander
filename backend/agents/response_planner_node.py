@@ -16,11 +16,12 @@ This single node does three things, in order, for one incident:
    LLM involved in this step at all -- and writes one `AuditEvent` row per
    action (this is the FIRST node in the graph that performs a real DB
    write/commit; every prior node is read-only against Postgres).
-3. Sets `IncidentState.incident_status` to a placeholder terminal value
+3. Sets `IncidentState.incident_status` to a genuine transitional value
    based on the classifications: `EXECUTING` if every action is SAFE
-   (queued for the not-yet-built Action Executor), `AWAITING_APPROVAL` if
-   any action is HIGH_IMPACT (queued for the not-yet-built human-approval
-   `interrupt()` gate).
+   (routes straight to the Action Executor), `AWAITING_APPROVAL` if any
+   action is HIGH_IMPACT (routes to the human-approval `interrupt()`
+   gate). Both are real downstream nodes now, not placeholders -- see
+   "What this node does NOT do" below.
 
 Steps 2-3 are folded into this same node rather than split into a separate
 graph node: the classification logic itself
@@ -31,24 +32,22 @@ keeping the "write one AuditEvent per action + decide routing" step
 together in one place matches how `investigation_node`/`root_cause_node`
 already each do "one LLM call + local post-processing" in a single node.
 
-## What this node does NOT do yet
+## What this node does NOT do
 
-No Action Executor, no Recovery Check -- those are later Phase 6
-sub-steps. The real `interrupt()`-based Human Approval gate now exists as
-a separate downstream node (`backend.agents.human_approval_node`, wired in
-`backend/graph.py`) and `POST /approve`/`/reject` now exist
-(`backend.api.approvals`) -- this node's own job is unchanged: propose
-actions, classify risk, write the `AuditEvent` rows, and set
-`incident_status`. `EXECUTING` (all-SAFE plan) is still a placeholder
-terminal state -- the graph ends right after this node for that branch
-until the Action Executor exists (see `backend/graph.py`). `EXECUTING`
-staying a plain state assignment rather than a real executor is exactly
-the same reasoning `human_approval_node` documents for the HIGH_IMPACT
-branch's own post-approval placeholder. "AUTO_EXECUTED but `executed_at`
-is still NULL" is the intentionally-modeled "queued for execution, not yet
+This node's own job stops at: propose actions, classify risk, write the
+`AuditEvent` rows, and set `incident_status`. The real `interrupt()`-based
+Human Approval gate (`backend.agents.human_approval_node`), the Action
+Executor (`backend.agents.action_executor_node`), and the Recovery Check
+(`backend.agents.recovery_check_node`) are all separate downstream nodes
+wired in `backend/graph.py` -- this node never calls any of them directly.
+`EXECUTING` (all-SAFE plan) is a genuine transitional state now, not a
+placeholder: `backend/graph.py` routes straight from here to
+`action_executor`, which immediately overwrites it to `DIAGNOSED` (nothing
+left to verify) once it runs. "AUTO_EXECUTED but `executed_at` is still
+NULL" is the intentionally-modeled "queued for execution, not yet
 executed" state for a SAFE action at this point -- see
 `backend/models/audit.py`'s docstring for why `executed_at` starting NULL
-is exactly what makes the future Action Executor's idempotency guard work.
+is exactly what makes the Action Executor's idempotency guard work.
 
 ## Model routing
 

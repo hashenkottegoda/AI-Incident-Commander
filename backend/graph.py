@@ -5,27 +5,53 @@ BUILD_PLAN.md Phase 5: *"Build the StateGraph: Triage -> Investigation loop
 -> RAG -> Root Cause/Hypothesis -> conditional re-investigation loop back to
 Investigation."* Phase 6 continues the same graph past Root Cause: *"RESPONSE
 PLANNER ... -> RISK CLASSIFIER ... -> SAFE -> ACTION EXECUTOR ... HIGH-IMPACT
--> HUMAN APPROVAL (LangGraph `interrupt`, resumed via POST /approve|/reject)."*
-This module now builds through the Response Planner + (inline) Risk
-Classifier + the real `interrupt()`-based Human Approval gate
-(`backend.agents.human_approval_node`) -- the Action Executor and Recovery
-Check are the next Phase 6 sub-steps, not built here (see that node's
-docstring for the placeholder it uses in the meantime).
+-> HUMAN APPROVAL (LangGraph `interrupt`, resumed via POST /approve|/reject)
+... ACTION EXECUTOR -> RECOVERY CHECK ... RESOLVED | back to INVESTIGATION
+(bounded; exhausted -> MANUAL_INTERVENTION_REQUIRED)."* This module now
+builds the FULL Phase 6 graph, terminal states and all: Response Planner +
+(inline) Risk Classifier, the real `interrupt()`-based Human Approval gate
+(`backend.agents.human_approval_node`), the Action Executor
+(`backend.agents.action_executor_node`), and the Recovery Check
+(`backend.agents.recovery_check_node`) that closes the loop back to
+`resolved` / `manual_intervention_required` / a fresh Investigation pass.
 
 ```
-START -> triage -> investigation -> rag -> root_cause -+-> response_planner -+-> human_approval
-                        ^                               |                    |         |
-                        +---- (reinvestigate) ----------+                    |         v
-                                                                              |        END
-                                                                              +-> END
+START -> triage -> investigation -> rag -> root_cause -> response_planner
+              ^                        |
+              +---- reinvestigate -----+
+response_planner -> human_approval (HIGH_IMPACT) -> action_executor
+response_planner -> action_executor (SAFE-only, skips human_approval)
+action_executor -> END (SAFE-only, nothing to verify)
+action_executor -> recovery_check (a HIGH_IMPACT remediation just ran)
+recovery_check -> END (RESOLVED)
+recovery_check -> investigation (still degraded, budget remains)
+recovery_check -> END (MANUAL_INTERVENTION_REQUIRED, budget exhausted)
 ```
 
-- `response_planner -> human_approval -> END`: any HIGH_IMPACT action.
-  `human_approval` calls `interrupt()`, resumed via `POST /approve` or
-  `/reject` (`backend.api.approvals`).
-- `response_planner -> END` directly: an all-SAFE plan, nothing for a
-  human to approve. `incident_status = EXECUTING` -- the not-yet-built
-  Action Executor's SAFE-branch entry point.
+- `response_planner -> human_approval -> action_executor`: any HIGH_IMPACT
+  action. `human_approval` calls `interrupt()`, resumed via `POST /approve`
+  (`backend.api.approvals`) with `Command(resume=...)`; `action_executor`
+  runs strictly after that resume, never before (`interrupt()`'s
+  side-effect-safety rule -- see `human_approval_node`'s docstring).
+  `POST /reject` never resumes the graph at all, so `action_executor` is
+  never reachable from a rejection, by construction (see
+  `backend.api.approvals`'s docstring).
+- `response_planner -> action_executor` directly: an all-SAFE plan,
+  nothing for a human to approve (`route_after_response_planner` routes
+  this case straight past `human_approval`).
+- `action_executor -> recovery_check`: only when at least one HIGH_IMPACT
+  remediation was just executed (`route_after_action_executor`, reading
+  `incident_status == VERIFYING`). A SAFE-only plan has nothing to verify
+  and routes `action_executor -> END` (`incident_status = DIAGNOSED`)
+  instead.
+- `recovery_check -> END` (`RESOLVED`) when post-action telemetry matches
+  the pre-incident baseline within tolerance; `recovery_check ->
+  investigation` (looping back through rag/root_cause/response_planner for
+  a fresh attempt) when it doesn't and the bounded re-investigation budget
+  (`investigation_iterations` vs. `routing.MAX_REINVESTIGATION_LOOPS` --
+  the SAME bound the root-cause loop already uses) hasn't been exhausted;
+  `recovery_check -> END` (`MANUAL_INTERVENTION_REQUIRED`) once it has
+  (`route_after_recovery_check`).
 
 `build_incident_graph` returns the **uncompiled** `StateGraph` -- callers
 attach whichever checkpointer fits their context: `AsyncPostgresSaver` for
@@ -44,12 +70,19 @@ from langgraph.types import Command, StateSnapshot
 from qdrant_client import QdrantClient
 from sqlalchemy.orm import Session
 
+from backend.agents.action_executor_node import make_action_executor_node
 from backend.agents.human_approval_node import human_approval_node
 from backend.agents.investigation_node import make_investigation_node
 from backend.agents.rag_node import make_rag_node
+from backend.agents.recovery_check_node import make_recovery_check_node
 from backend.agents.response_planner_node import make_response_planner_node
 from backend.agents.root_cause_node import make_root_cause_node
-from backend.agents.routing import route_after_response_planner, route_after_root_cause
+from backend.agents.routing import (
+    route_after_action_executor,
+    route_after_recovery_check,
+    route_after_response_planner,
+    route_after_root_cause,
+)
 from backend.agents.state import IncidentState
 from backend.agents.triage_node import make_triage_node
 from backend.config import get_settings
@@ -83,6 +116,8 @@ def build_incident_graph(db: Session, qdrant_client: QdrantClient | None = None)
     graph.add_node("root_cause", make_root_cause_node())
     graph.add_node("response_planner", make_response_planner_node(db))
     graph.add_node("human_approval", human_approval_node)
+    graph.add_node("action_executor", make_action_executor_node(db))
+    graph.add_node("recovery_check", make_recovery_check_node(db))
 
     graph.add_edge(START, "triage")
     graph.add_edge("triage", "investigation")
@@ -93,22 +128,39 @@ def build_incident_graph(db: Session, qdrant_client: QdrantClient | None = None)
         route_after_root_cause,
         {"reinvestigate": "investigation", "end": "response_planner"},
     )
-    # SAFE-only plan -> straight to END (incident_status = EXECUTING, the
-    # not-yet-built Action Executor's SAFE-branch entry point). Any
-    # HIGH_IMPACT action -> the interrupt() gate; see
+    # SAFE-only plan -> straight to action_executor (no human in the loop
+    # needed). Any HIGH_IMPACT action -> the interrupt() gate; see
     # backend.agents.human_approval_node's docstring for why that gate is
     # its own dedicated node rather than folded into response_planner.
     graph.add_conditional_edges(
         "response_planner",
         route_after_response_planner,
-        {"human_approval": "human_approval", "end": END},
+        {"human_approval": "human_approval", "end": "action_executor"},
     )
-    # human_approval is Phase 6's current terminal node on the HIGH_IMPACT
-    # branch: it pauses at interrupt() until POST /approve resumes it (see
-    # backend.api.approvals), then sets a placeholder post-approval
-    # incident_status and the graph ends there until the real Action
-    # Executor / Recovery Check exist.
-    graph.add_edge("human_approval", END)
+    # human_approval pauses at interrupt() until POST /approve resumes it
+    # (backend.api.approvals) -- action_executor runs strictly after that
+    # resume, never before (interrupt()'s side-effect-safety rule). A
+    # rejection never resumes the graph at all (see backend.api.approvals's
+    # docstring), so action_executor is never reachable from that path.
+    graph.add_edge("human_approval", "action_executor")
+    # A SAFE-only plan has nothing to verify -> straight to END
+    # (incident_status = DIAGNOSED). Any executed HIGH_IMPACT remediation
+    # -> recovery_check verifies it against real post-action telemetry.
+    graph.add_conditional_edges(
+        "action_executor",
+        route_after_action_executor,
+        {"recovery_check": "recovery_check", "end": END},
+    )
+    # recovery_check is the graph's final decision point: RESOLVED or
+    # MANUAL_INTERVENTION_REQUIRED both end the graph; still-degraded with
+    # re-investigation budget remaining loops back to a fresh Investigation
+    # pass (see route_after_recovery_check's docstring for the shared
+    # investigation_iterations bound).
+    graph.add_conditional_edges(
+        "recovery_check",
+        route_after_recovery_check,
+        {"investigation": "investigation", "end": END},
+    )
     return graph
 
 

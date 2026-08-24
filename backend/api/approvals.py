@@ -310,9 +310,11 @@ async def _decide_pending_actions(
         )
 
     # Approved: the decision is already durable above -- now resume the
-    # exact paused thread. `human_approval_node`'s only remaining job is to
-    # turn this resume payload into a placeholder post-approval
-    # incident_status (see that node's docstring).
+    # exact paused thread. `human_approval_node` itself just forwards the
+    # resume payload; the graph then drives the action through the real
+    # Action Executor and Recovery Check (backend/agents/action_executor_node.py,
+    # recovery_check_node.py), landing on RESOLVED, back at INVESTIGATING
+    # (bounded), or MANUAL_INTERVENTION_REQUIRED -- not a placeholder.
     final_state = await resume_incident_graph(
         db, incident, {"decision": "approved", "approver": approver}
     )

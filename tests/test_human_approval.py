@@ -10,9 +10,13 @@ operations, no `ChatAnthropic` mocking can substitute for that):
 
 1. A HIGH_IMPACT plan genuinely halts the graph -- verified via the
    checkpointer's own `StateSnapshot` (`.next`/`.interrupts`), not just an
-   `incident_status` field -- and `POST /approve` resumes it to the
-   placeholder post-approval state, with the `AuditEvent` correctly
-   `APPROVED`.
+   `incident_status` field -- and `POST /approve` resumes it all the way
+   through the real Action Executor + Recovery Check
+   (`backend.agents.action_executor_node`/`recovery_check_node`) to
+   `RESOLVED` (the `_ROLLBACK_PLAN` below recommends `rollback_deployment`,
+   `db_connection_exhaustion`'s actual `correct_remediation` per
+   `failure_scenarios/db_connection_exhaustion.yaml`), with the
+   `AuditEvent` correctly `EXECUTED`/`RECOVERED`.
 2. `POST /reject` never resumes the graph at all (the checkpoint stays
    parked exactly at `interrupt()`), sets `incident_status =
    manual_intervention_required`, and the `AuditEvent` is `REJECTED` with
@@ -48,6 +52,7 @@ from backend.db import SessionLocal
 from backend.models import (
     AuditDecisionStatus,
     AuditEvent,
+    ExecutionOutcome,
     Incident,
     IncidentStatus,
     RiskClassification,
@@ -140,7 +145,7 @@ async def test_high_impact_plan_halts_graph_and_approve_resumes_it(monkeypatch):
         body = response.json()
         assert body["decision"] == "approved"
         assert body["resumed"] is True
-        assert body["incident_status"] == IncidentStatus.EXECUTING.value
+        assert body["incident_status"] == IncidentStatus.RESOLVED.value
         assert body["approver"] == "oncall-jane"
         assert body["decided_at"] is not None
         assert body["audit_event_ids"]
@@ -148,13 +153,14 @@ async def test_high_impact_plan_halts_graph_and_approve_resumes_it(monkeypatch):
         fresh_db2 = SessionLocal()
         try:
             event2 = fresh_db2.query(AuditEvent).filter(AuditEvent.incident_id == incident.id).one()
-            assert event2.decision_status is AuditDecisionStatus.APPROVED
+            assert event2.decision_status is AuditDecisionStatus.EXECUTED
             assert event2.approver == "oncall-jane"
             assert event2.decided_at is not None
-            assert event2.executed_at is None  # placeholder step never "executes" anything
+            assert event2.executed_at is not None  # the real Action Executor ran
+            assert event2.execution_outcome is ExecutionOutcome.RECOVERED
 
             incident_row = fresh_db2.get(Incident, incident.id)
-            assert incident_row.status == IncidentStatus.EXECUTING
+            assert incident_row.status == IncidentStatus.RESOLVED
         finally:
             fresh_db2.close()
 
@@ -253,7 +259,14 @@ async def test_duplicate_approve_is_idempotent(monkeypatch):
             )
             assert len(events) == 1  # no duplicate AuditEvent row
             assert events[0].approver == "first"
-            assert events[0].decision_status is AuditDecisionStatus.APPROVED
+            # The real Action Executor ran on the first (genuine) approve --
+            # this is criterion (e)'s "already executed" case, not just
+            # "already decided": the duplicate call must not re-execute the
+            # remediation (no second EXECUTED transition, no second
+            # telemetry write -- see test_action_executor_recovery_check.py
+            # for the metric-level version of this check).
+            assert events[0].decision_status is AuditDecisionStatus.EXECUTED
+            assert events[0].execution_outcome is ExecutionOutcome.RECOVERED
         finally:
             fresh_db.close()
     finally:
@@ -309,7 +322,7 @@ async def test_approve_recovers_a_stuck_resume(monkeypatch):
         body = response.json()
         assert body["decision"] == "approved"
         assert body["resumed"] is True
-        assert body["incident_status"] == IncidentStatus.EXECUTING.value
+        assert body["incident_status"] == IncidentStatus.RESOLVED.value
         # The original decision/approver is preserved -- the retry never
         # re-decides, it only completes the interrupted resume.
         assert body["approver"] == "first-attempt"
@@ -324,8 +337,10 @@ async def test_approve_recovers_a_stuck_resume(monkeypatch):
             events = fresh_db.query(AuditEvent).filter(AuditEvent.incident_id == incident.id).all()
             assert len(events) == 1  # never re-decided into a second row
             assert events[0].approver == "first-attempt"
+            assert events[0].decision_status is AuditDecisionStatus.EXECUTED
+            assert events[0].execution_outcome is ExecutionOutcome.RECOVERED
             incident_row = fresh_db.get(Incident, incident.id)
-            assert incident_row.status == IncidentStatus.EXECUTING
+            assert incident_row.status == IncidentStatus.RESOLVED
         finally:
             fresh_db.close()
     finally:
@@ -338,13 +353,23 @@ async def test_approve_recovers_a_stuck_resume(monkeypatch):
 
 
 async def test_resuming_an_already_resumed_thread_never_recreates_audit_rows(monkeypatch):
-    """Bypasses backend.api.approvals's own guard on purpose -- calls
-    `resume_incident_graph` directly, twice, to isolate what LangGraph's
-    `interrupt()` mechanism itself guarantees (human_approval_node is only
-    ever re-executed up to a completed interrupt() call; response_planner
-    -- which already ran to completion and committed before the interrupt
-    -- is never touched again), independent of the API-level idempotency
-    guard tested above."""
+    """Bypasses backend.api.approvals's own decision-making on purpose --
+    calls `resume_incident_graph` directly, twice, to isolate what
+    LangGraph's `interrupt()` mechanism itself guarantees (human_approval_node
+    is only ever re-executed up to a completed interrupt() call;
+    response_planner -- which already ran to completion and committed
+    before the interrupt -- is never touched again), independent of the
+    API-level idempotency guard tested above.
+
+    Still marks the `AuditEvent` `APPROVED` directly first (exactly what
+    `backend.api.approvals` would have committed before ever calling
+    `resume_incident_graph` -- see that module's docstring): the real
+    Action Executor now genuinely depends on that DB row's state (not just
+    the `interrupt()` resume payload) to decide what's actionable, so a
+    bypassed resume with no underlying approved row would correctly
+    execute nothing at all -- this test is about `interrupt()`'s own
+    replay safety once a genuine approval exists, not about what happens
+    without one."""
     from backend.graph import resume_incident_graph
     from backend.main import app
 
@@ -355,20 +380,27 @@ async def test_resuming_an_already_resumed_thread_never_recreates_audit_rows(mon
     try:
         incident = await _run_to_interrupt(monkeypatch, db)
 
+        event = db.query(AuditEvent).filter(AuditEvent.incident_id == incident.id).one()
+        event.decision_status = AuditDecisionStatus.APPROVED
+        event.approver = "x"
+        event.decided_at = datetime.now(UTC)
+        db.commit()
+
         qdrant_client = get_qdrant_client()
         resume_payload = {"decision": "approved", "approver": "x"}
 
         state_1 = await resume_incident_graph(
             db, incident, resume_payload, qdrant_client=qdrant_client
         )
-        assert state_1.incident_status == IncidentStatus.EXECUTING
+        assert state_1.incident_status == IncidentStatus.RESOLVED
 
         state_2 = await resume_incident_graph(
             db, incident, resume_payload, qdrant_client=qdrant_client
         )
         # LangGraph itself no-ops a resume on a thread with nothing left to
-        # resume -- same final state, not a second execution.
-        assert state_2.incident_status == IncidentStatus.EXECUTING
+        # resume -- same final state, not a second execution (in
+        # particular, not a second Action Executor run).
+        assert state_2.incident_status == IncidentStatus.RESOLVED
 
         fresh_db = SessionLocal()
         try:
@@ -376,9 +408,12 @@ async def test_resuming_an_already_resumed_thread_never_recreates_audit_rows(mon
                 fresh_db.query(AuditEvent).filter(AuditEvent.incident_id == incident.id).all()
             )
             # Exactly the one row response_planner_node created BEFORE the
-            # interrupt -- never duplicated by either resume call.
+            # interrupt -- never duplicated by either resume call, and only
+            # ever executed once (EXECUTED/RECOVERED, not re-run into a
+            # second telemetry write) despite two resume calls.
             assert len(events) == 1
-            assert events[0].decision_status == AuditDecisionStatus.PENDING_APPROVAL
+            assert events[0].decision_status == AuditDecisionStatus.EXECUTED
+            assert events[0].execution_outcome == ExecutionOutcome.RECOVERED
         finally:
             fresh_db.close()
     finally:
