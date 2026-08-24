@@ -34,10 +34,11 @@ of five telemetry "kinds":
 
 - **DEPLOYMENT** — entry names a version (`_v<digits>` or contains
   "deployment", e.g. `checkout_deployment_v1.8.2`) -> one `Deployment` row.
-- **DEPENDENCY** — entry describes cross-service retry behavior
-  (`checkout_retry_storm`) -> a handful of `TraceLite` spans from the
-  affected service to `payment-service` (`downstream_service_id`), with
-  `duration_ms` ramping up, plus one WARN `LogEntry`.
+- **DEPENDENCY** — entry describes a cross-service call becoming unhealthy
+  (`checkout_retry_storm`, `checkout_dependency_errors`) -> a handful of
+  `TraceLite` spans from the affected service to the named downstream
+  service (`downstream_service_id`), with `duration_ms` ramping up, plus
+  one `LogEntry` (level/message per entry — see `DEPENDENCY_ENTRIES`).
 - **DISCRETE_EVENT** — a one-off state-change marker that isn't itself a
   metric trend (`payment_canary_flag_enabled`, `oom_kill_event`,
   `inventory_slow_query_detected`) -> a single `LogEntry` at an
@@ -208,6 +209,15 @@ ERROR_CLUSTER_MESSAGES: dict[str, tuple[str, ...]] = {
     "http_500_spike": ("{service} returned HTTP 500 to client",),
     "payment_request_failures": ("{service} payment authorization request failed",),
     "payment_service_timeout_errors": ("{service} upstream payment provider request timed out",),
+    # dependency_failure's provider error is deliberately NOT timeout-framed
+    # (contrast with payment_service_timeout_errors above, shared with
+    # cascading_payment_timeout) -- see dependency_failure.yaml's header
+    # comment for why the two scenarios need textually distinguishable
+    # evidence, not just different root_cause_category strings.
+    "payment_service_error_responses": (
+        "{service} upstream payment provider returned HTTP 502 Bad Gateway",
+        "{service} payment provider integration returned an unexpected error response",
+    ),
     "inventory_request_timeouts": ("{service} inventory lookup request timed out",),
     "database_overload": ("{service} database overload: query queue full, requests timing out",),
 }
@@ -235,7 +245,25 @@ DISCRETE_EVENT_SPECS: dict[str, tuple[LogLevel, str, dict | None]] = {
     ),
 }
 
-DEPENDENCY_ENTRIES: frozenset[str] = frozenset({"checkout_retry_storm"})
+# entry -> (downstream service name, log level, message template).
+# `checkout_dependency_errors` was added after a live Phase 3 investigator
+# run correctly diagnosed `application_bug` instead of
+# `upstream_dependency_failure` for dependency_failure.yaml: that scenario's
+# expected_evidence listed `checkout_dependency_errors` but its causal_chain
+# never actually generated it, so get_dependencies genuinely returned no
+# spans and the agent had no evidence of a downstream dependency at all.
+DEPENDENCY_ENTRIES: dict[str, tuple[str, LogLevel, str]] = {
+    "checkout_retry_storm": (
+        "payment-service",
+        LogLevel.WARN,
+        "{service} retrying {downstream} request after timeout",
+    ),
+    "checkout_dependency_errors": (
+        "payment-service",
+        LogLevel.ERROR,
+        "{service} downstream call to {downstream} failed: canary payment provider error",
+    ),
+}
 
 
 def _resolve_target_service(
@@ -388,14 +416,17 @@ def _apply_causal_chain(
             continue
 
         if entry in DEPENDENCY_ENTRIES:
-            downstream = services["payment-service"]
+            downstream_name, log_level, message_template = DEPENDENCY_ENTRIES[entry]
+            downstream = services[downstream_name]
             rows.extend(_dependency_spans(target, downstream, step_time, telemetry_end, rng))
             rows.append(
                 LogEntry(
                     service_id=target.id,
                     timestamp=event_time,
-                    level=LogLevel.WARN,
-                    message=f"{target.name} retrying {downstream.name} request after timeout",
+                    level=log_level,
+                    message=message_template.format(
+                        service=target.name, downstream=downstream.name
+                    ),
                     attributes={"downstream_service": downstream.name},
                 )
             )

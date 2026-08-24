@@ -271,6 +271,45 @@ def test_inject_failure_is_deterministic_for_a_fixed_seed(db, scenarios):
     assert run_c[1] != run_a[1]
 
 
+def test_dependency_failure_produces_dependency_span_evidence(db, scenarios):
+    """Regression test: dependency_failure.yaml's expected_evidence lists
+    `checkout_dependency_errors`, which used to be missing from its
+    causal_chain entirely -- get_dependencies genuinely returned no spans,
+    which is what led a real Phase 3 investigator run to misdiagnose this
+    as `application_bug` instead of `upstream_dependency_failure`."""
+    scenario = scenarios["dependency_failure"]
+    assert "checkout_dependency_errors" in scenario.causal_chain
+
+    incident_start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    incident = inject_failure(db, scenario, random.Random(1), incident_start)
+
+    checkout = db.execute(select(Service).where(Service.name == "checkout-service")).scalar_one()
+    payment = db.execute(select(Service).where(Service.name == "payment-service")).scalar_one()
+    assert incident.service_id == checkout.id
+
+    traces = (
+        db.execute(
+            select(TraceLite).where(
+                TraceLite.service_id == checkout.id, TraceLite.downstream_service_id == payment.id
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert traces, "get_dependencies must find checkout->payment spans for dependency_failure"
+
+    dependency_errors = (
+        db.execute(
+            select(LogEntry).where(
+                LogEntry.service_id == checkout.id, LogEntry.level == LogLevel.ERROR
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert any("downstream call" in log.message for log in dependency_errors)
+
+
 def test_bad_deployment_causal_chain_is_tight(db, scenarios):
     """bad_deployment's own YAML comment: chain timestamps should be
     tight/back-to-back, not spread over minutes like the default stagger."""
