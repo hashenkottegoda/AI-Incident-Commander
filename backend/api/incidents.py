@@ -10,10 +10,13 @@ end-to-end; wiring `DiagnosisResult` into the `Incident` lifecycle
 (`triaging -> investigating -> diagnosed -> ...`) is Phase 5's job once
 the full graph exists.
 
-`/investigate` (this route, unchanged) MUST keep running Phase 3's baseline
-exactly as-is — Phase 7's eval harness needs Experiment B unmodified for
-the A/B/C/D comparison to be meaningful. `POST
-/{incident_id}/investigate/graph` is the new Phase 5 route: runs the full
+`/investigate` calls `investigate_incident(db, incident)` with no
+`include_rag` argument, so it runs with the default `include_rag=True` --
+Experiment C's configuration (tools + historical incidents), not
+Experiment B. Phase 7's eval harness drives Experiment B vs. C by calling
+`investigate_incident()` directly with an explicit `include_rag=` on each
+side, not through this HTTP route — see that function's docstring.
+`POST /{incident_id}/investigate/graph` is the new Phase 5 route: runs the full
 `StateGraph` (Triage -> Investigation loop -> RAG -> Root Cause, with the
 bounded conditional re-investigation loop) via `backend.graph.
 run_incident_graph`, and returns the same shared `DiagnosisResult` shape
@@ -48,7 +51,9 @@ def _get_incident_or_404(incident_id: int, db: Session) -> Incident:
 
 @router.post("/{incident_id}/investigate", response_model=DiagnosisResult)
 def investigate(incident_id: int, db: Session = Depends(get_db)) -> DiagnosisResult:  # noqa: B008
-    """Run the Phase 3 baseline investigator against `incident_id`."""
+    """Run the tool-using investigator (Experiment C's configuration --
+    tools + RAG, since `include_rag` defaults to `True`) against
+    `incident_id`."""
     incident = _get_incident_or_404(incident_id, db)
     return investigate_incident(db, incident)
 

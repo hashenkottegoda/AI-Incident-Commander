@@ -1,4 +1,12 @@
-"""Phase 3's single-agent investigator — BUILD_PLAN.md's Experiment B baseline.
+"""Phase 3's single-agent investigator — BUILD_PLAN.md's Experiment B/C engine.
+
+Serves as the implementation of BOTH Experiment B ("LLM + tools", no RAG)
+and Experiment C ("LLM + tools + historical incidents") for Phase 7's
+A/B/C/D comparison, selected via `investigate_incident`'s `include_rag`
+keyword-only parameter (default `True` — the live `/investigate` endpoint
+and existing behavior run as Experiment C's configuration; pass
+`include_rag=False` for a genuine Experiment B run). See that function's
+docstring for the full reasoning.
 
 BUILD_PLAN.md Phase 3: *"One LangGraph node: `ChatAnthropic` + `ToolNode`
 ReAct loop, ends in a `DiagnosisResult` ... Validates tool-calling mechanics
@@ -219,8 +227,10 @@ def _run_react_loop(llm_with_tools, tools: list[BaseTool], messages: list[BaseMe
             return
 
 
-def investigate_incident(db: Session, incident: Incident) -> DiagnosisResult:
-    """Run the Phase 3 baseline investigator against one incident.
+def investigate_incident(
+    db: Session, incident: Incident, *, include_rag: bool = True
+) -> DiagnosisResult:
+    """Run the tool-using investigator against one incident.
 
     Binds `backend.tools.build_tools(db)` to a `ChatAnthropic` instance
     (`get_settings().investigation_model`, no `temperature`/`top_p` --
@@ -228,6 +238,22 @@ def investigate_incident(db: Session, incident: Incident) -> DiagnosisResult:
     loop, then makes one final `.with_structured_output(DiagnosisResult)`
     call against the same model with the full conversation (including real
     tool results) as context. Returns the resulting `DiagnosisResult`.
+
+    `include_rag` (default `True`, preserving this function's existing
+    behavior for `POST /api/incidents/{id}/investigate` and
+    `tests/test_investigator.py`) controls whether
+    `search_historical_incidents` is bound alongside the Phase 2 tools.
+    This flag exists because this SAME function serves as the
+    implementation of TWO of Phase 7's four eval experiments: BUILD_PLAN.md
+    defines Experiment B as "LLM + tools (selective retrieval)" (Phase 3,
+    no RAG) and Experiment C as "LLM + tools + historical incidents"
+    (Phase 4, RAG added) -- two experiments explicitly meant to isolate
+    RAG's marginal effect on diagnosis quality. Before this parameter
+    existed, Phase 4 had unconditionally added the RAG tool here, which
+    would have made B and C run the identical configuration and collapsed
+    the comparison Phase 7 exists to make. Call with `include_rag=False`
+    for a genuine Experiment B run, `include_rag=True` (the default) for
+    Experiment C / the live `/investigate` endpoint's normal behavior.
     """
     settings = get_settings()
     # RAG tool bound separately (backend.tools.build_rag_tools) because it
@@ -237,7 +263,9 @@ def investigate_incident(db: Session, incident: Incident) -> DiagnosisResult:
     # constructor (no network I/O happens until a tool call actually
     # searches), so adding it here doesn't change this function's
     # lazy-until-invoked behavior.
-    tools = build_tools(db) + build_rag_tools(get_qdrant_client())
+    tools = build_tools(db)
+    if include_rag:
+        tools = tools + build_rag_tools(get_qdrant_client())
 
     # No temperature/top_p: these models reject sampling params (BUILD_PLAN.md
     # Tech Stack). max_tokens is set explicitly rather than relying on the

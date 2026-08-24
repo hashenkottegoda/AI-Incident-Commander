@@ -358,3 +358,39 @@ def test_investigator_tool_list_includes_search_historical_incidents(monkeypatch
     finally:
         db.rollback()
         db.close()
+
+
+@pytest.mark.skipif(
+    not _postgres_reachable(),
+    reason="Postgres not reachable at DATABASE_URL (start it with `docker compose up -d postgres`)",
+)
+def test_investigator_include_rag_false_excludes_search_historical_incidents(monkeypatch):
+    """Phase 7 needs `investigate_incident(..., include_rag=False)` to be a
+    genuine Experiment B run (tools only, no RAG) -- distinct from the
+    default `include_rag=True` behavior tested above, which is Experiment
+    C's configuration (tools + RAG). Without this parameter, B and C would
+    run the identical tool set and the A/B/C/D comparison would be
+    meaningless."""
+    import backend.agents.investigator as investigator_module
+    from backend.db import SessionLocal
+    from backend.simulation.injector import inject_failure
+    from backend.simulation.scenario_schema import load_all_scenarios
+
+    monkeypatch.setattr(investigator_module, "ChatAnthropic", _FakeChatAnthropic)
+
+    db = SessionLocal()
+    try:
+        scenario = load_all_scenarios()["db_connection_exhaustion"]
+        incident = inject_failure(
+            db, scenario, random.Random(123), datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+        )
+
+        result = investigator_module.investigate_incident(db, incident, include_rag=False)
+
+        bound_names = {t.name for t in _FakeChatAnthropic.last_bound_tools}
+        assert bound_names == {"get_logs", "get_metrics", "get_deployments", "get_dependencies"}
+        assert "search_historical_incidents" not in bound_names
+        assert result.root_cause_category == "unknown"  # the stub result round-tripped
+    finally:
+        db.rollback()
+        db.close()
