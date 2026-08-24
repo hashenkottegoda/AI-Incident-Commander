@@ -1,6 +1,5 @@
 # Dev-only infrastructure for AI Incident Commander.
-# `docker compose up -d` boots postgres + qdrant with persistent volumes.
-# The `backend` service is added in a later Phase 0 step once the FastAPI app exists.
+# `docker compose up -d` boots postgres + qdrant + backend with persistent volumes.
 #
 # Credentials below are dev-only defaults, not secrets — do not reuse in production.
 
@@ -32,6 +31,35 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+
+  # No healthcheck / backend depends_on for qdrant yet: no code path touches
+  # Qdrant until Phase 4 (RAG layer), so a hard startup dependency would just
+  # slow down `docker compose up` for no correctness benefit today. Add both
+  # once the RAG layer actually calls it.
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: incident_commander_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Docker-network hostname, not localhost — inside Compose's network the
+      # service name `postgres` resolves to the postgres container.
+      DATABASE_URL: postgresql+psycopg://incident_commander:incident_commander@postgres:5432/incident_commander
+      QDRANT_URL: http://qdrant:6333
+      # Sourced from the host shell / a local .env file (via Compose's env
+      # passthrough) — never hardcoded here. See .env.example.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY in your environment or .env file}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      TRIAGE_MODEL: ${TRIAGE_MODEL:-claude-haiku-4-5}
+      INVESTIGATION_MODEL: ${INVESTIGATION_MODEL:-claude-opus-4-8}
+      RCA_MODEL: ${RCA_MODEL:-claude-opus-4-8}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:

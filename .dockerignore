@@ -1,0 +1,17 @@
+.git/
+.github/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.claude/
+tests/
+alembic/
+.env
+.env.*
+!.env.example
+*.md
+!README.md
+node_modules/
+.DS_Store
