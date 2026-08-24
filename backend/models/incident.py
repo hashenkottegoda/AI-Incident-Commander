@@ -25,6 +25,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.db import Base
 
 if TYPE_CHECKING:
+    from backend.models.audit import AuditEvent
     from backend.models.service import Service
 
 
@@ -159,9 +160,14 @@ class Incident(Base):
     scenario_instance_index: Mapped[int | None] = mapped_column(Integer, default=None)
 
     service: Mapped[Service] = relationship(back_populates="incidents")
+    # Phase 6's audit trail (backend/models/audit.py). CASCADE: see
+    # Service's docstring — an audit row is meaningless without its
+    # incident.
+    audit_events: Mapped[list[AuditEvent]] = relationship(
+        back_populates="incident", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return (
-            f"Incident(id={self.id!r}, failure_type={self.failure_type!r}, "
-            f"status={self.status!r})"
+            f"Incident(id={self.id!r}, failure_type={self.failure_type!r}, status={self.status!r})"
         )
