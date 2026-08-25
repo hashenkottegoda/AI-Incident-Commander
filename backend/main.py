@@ -11,6 +11,7 @@ layer in a later Phase 0 sub-step.
 from fastapi import FastAPI
 
 from backend.api.approvals import router as approvals_router
+from backend.api.evaluation import router as evaluation_router
 from backend.api.health import router as health_router
 from backend.api.incidents import router as incidents_router
 from backend.api.simulation import router as simulation_router
@@ -25,3 +26,4 @@ app.include_router(health_router)
 app.include_router(incidents_router)
 app.include_router(approvals_router)
 app.include_router(simulation_router)
+app.include_router(evaluation_router)
