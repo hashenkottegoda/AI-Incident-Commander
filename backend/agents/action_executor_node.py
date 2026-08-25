@@ -283,6 +283,20 @@ def _write_degraded_points(
     return points
 
 
+def is_correct_remediation(scenario: FailureScenario, action_type: str) -> bool:
+    """Whether `action_type` is exactly this scenario's ground-truth
+    `remediation_effects.correct_remediation`.
+
+    Shared with `backend.evaluation.scoring` (imported from here, same
+    pattern as `resolve_on_correct_targets` below) so the Action Executor's
+    real "did this action recover the incident" decision and Phase 7's
+    operational-eval scoring can never independently drift apart on what
+    "correct" means -- one definition, two call sites.
+    """
+    effects = scenario.remediation_effects
+    return effects.correct_remediation is not None and action_type == effects.correct_remediation
+
+
 def _execute_high_impact_action(
     db: Session,
     scenario: FailureScenario,
@@ -294,9 +308,7 @@ def _execute_high_impact_action(
     Returns the `ExecutionOutcome` so the caller can decide the incident's
     overall status."""
     effects = scenario.remediation_effects
-    matched_correct = (
-        effects.correct_remediation is not None and event.action_type == effects.correct_remediation
-    )
+    matched_correct = is_correct_remediation(scenario, event.action_type)
     matched_known_ineffective = event.action_type in effects.ineffective_remediations
 
     targets = resolve_on_correct_targets(effects.on_correct or {}, scenario.affected_service)

@@ -41,6 +41,61 @@ against the seeded `historical_incidents/historical_incidents.yaml` ids.
 - **The A/B/C/D comparison table itself and dataset/experiment wiring.**
   Also later Phase 7 sub-steps; this module only supplies the per-run scoring
   primitives that table will aggregate.
+
+## Operational evaluation (D only) lives here too
+
+BUILD_PLAN.md's Phase 7 "Operational evaluation (D only -- the full closed
+loop)" section, verbatim:
+
+    "measures whether the AI can safely *fix* the problem, not just find
+    it:
+    - Remediation success rate = incidents recovered / incidents with
+      approved remediation.
+    - Recovery-verification accuracy = did the Recovery Check correctly
+      call `resolved` vs. still-degraded (vs. simulation ground truth)?
+    - Wrong-remediation rate = how often the planner recommended an
+      action that didn't fix the simulated incident."
+
+Unlike the diagnostic functions above (scored on a bare `DiagnosisResult`,
+immediately after RCA, before any response/remediation), these score the
+FULL closed loop -- `backend.graph.run_incident_graph`'s Response Planner
+-> Risk Classifier -> HITL -> Action Executor -> Recovery Check, NOT the
+diagnostic-only `run_incident_graph_to_diagnosis` -- and so need three
+inputs a diagnostic-only run never produces: the run's final
+`IncidentState` (for `incident_status`/`recovery_result`), that incident's
+persisted `AuditEvent` rows (`backend.models.audit`), and the incident's
+`FailureScenario.remediation_effects` (`backend.simulation.scenario_schema`
+-- the same ground truth `backend.agents.action_executor_node`/
+`backend.agents.recovery_check_node` are themselves built against, loaded
+the same way those two modules already do:
+`load_all_scenarios().get(incident.failure_type)`).
+
+### The denominator crux: "reached APPROVED status" means `{APPROVED,
+EXECUTED}`, not `{APPROVED}` alone
+
+`AuditEvent` rows are updated in place, not re-inserted, as they move
+through their lifecycle (`backend/models/audit.py`'s module docstring) --
+a HIGH_IMPACT action that was approved AND has since been executed shows
+`decision_status == EXECUTED`, never `APPROVED`, by the time a full
+closed-loop run has finished (`AuditDecisionStatus`'s own docstring: "an
+`APPROVED` row only reaches the terminal `EXECUTED` state once the Action
+Executor has actually run"). Filtering on `decision_status == APPROVED`
+alone would therefore silently EXCLUDE every successfully-executed
+remediation from the denominator -- exactly backwards, since those are the
+incidents this metric most needs to count. "Reached APPROVED status" is
+correctly `decision_status in {APPROVED, EXECUTED}`: `EXECUTED` necessarily
+passed through `APPROVED` first (per the lifecycle above), `PENDING_
+APPROVAL` never got a decision at all, and `REJECTED` got a decision that
+wasn't approval -- BUILD_PLAN.md explicitly routes a rejection straight to
+`manual_intervention_required` without executing anything, so it was never
+"remediation attempted" either.
+
+A SAFE-only plan is excluded the same way, for a simpler reason:
+`recovery_check_node`'s own docstring says it is "only ever reached when
+`action_executor_node` ran at least one HIGH_IMPACT remediation this pass"
+-- a SAFE-only plan's `AuditEvent` rows are all `risk_classification ==
+SAFE`, so the HIGH_IMPACT filter every function below applies excludes
+them without needing a separate check.
 """
 
 from __future__ import annotations
@@ -51,9 +106,21 @@ from typing import NamedTuple
 
 from sqlalchemy.orm import Session
 
+from backend.agents.action_executor_node import is_correct_remediation, resolve_on_correct_targets
 from backend.agents.schemas import DiagnosisResult, SourceRef
-from backend.models import Deployment, LogEntry, MetricPoint, TraceLite
+from backend.agents.state import IncidentState
+from backend.models import (
+    AuditDecisionStatus,
+    AuditEvent,
+    Deployment,
+    IncidentStatus,
+    LogEntry,
+    MetricPoint,
+    RiskClassification,
+    TraceLite,
+)
 from backend.rag.historical_incidents import load_historical_incidents
+from backend.simulation.scenario_schema import FailureScenario
 
 # --------------------------------------------------------------------------
 # root-cause accuracy
@@ -400,3 +467,248 @@ def tool_call_efficiency(tool_call_count: int, evidence_count: int) -> ToolCallE
 
     ratio = evidence_count / tool_call_count if tool_call_count > 0 else None
     return ToolCallEfficiency(tool_call_count=tool_call_count, evidence_per_tool_call=ratio)
+
+
+# --------------------------------------------------------------------------
+# Operational evaluation (D only) -- see module docstring's "Operational
+# evaluation (D only) lives here too" section for BUILD_PLAN.md's exact
+# metric definitions and the denominator reasoning behind
+# `_REACHED_APPROVAL`.
+# --------------------------------------------------------------------------
+
+# See module docstring's "denominator crux" section.
+_REACHED_APPROVAL: frozenset[AuditDecisionStatus] = frozenset(
+    {AuditDecisionStatus.APPROVED, AuditDecisionStatus.EXECUTED}
+)
+
+
+def _high_impact_events(
+    db: Session, incident_id: int, decision_statuses: frozenset[AuditDecisionStatus]
+) -> list[AuditEvent]:
+    """HIGH_IMPACT `AuditEvent` rows for `incident_id` whose `decision_status`
+    is one of `decision_statuses`, oldest (lowest id) first -- oldest-first
+    ordering matters for `wrong_remediation_flags`, which reports one flag
+    per remediation attempt in the order those attempts were executed
+    across a bounded re-investigation loop."""
+    return (
+        db.query(AuditEvent)
+        .filter(
+            AuditEvent.incident_id == incident_id,
+            AuditEvent.risk_classification == RiskClassification.HIGH_IMPACT,
+            AuditEvent.decision_status.in_(decision_statuses),
+        )
+        .order_by(AuditEvent.id)
+        .all()
+    )
+
+
+def remediation_attempted(db: Session, incident_id: int) -> bool:
+    """`True` iff `incident_id`'s response plan included at least one
+    HIGH_IMPACT action that reached APPROVED status -- the denominator
+    membership test shared by `remediation success rate` and
+    `recovery-verification accuracy` (BUILD_PLAN.md). See module
+    docstring's "denominator crux" section for why `{APPROVED, EXECUTED}`,
+    not `{APPROVED}` alone, is the correct set to check.
+    """
+    return bool(_high_impact_events(db, incident_id, _REACHED_APPROVAL))
+
+
+def remediation_succeeded(final_state: IncidentState) -> bool:
+    """BUILD_PLAN.md's "incidents recovered" -- the numerator for
+    remediation success rate.
+
+    `IncidentStatus.RESOLVED` is set in exactly one place in this codebase
+    -- `recovery_check_node`, only when its own metric comparison finds
+    every `remediation_effects.on_correct` target back within tolerance of
+    its pre-incident baseline -- so checking `final_state.incident_status`
+    here is equivalent to checking `final_state.recovery_result["outcome"]
+    == "recovered"`, and reads more directly as "did the incident, overall,
+    end up fixed" (`recovery_result` can be `None` for an out-of-scope
+    incident; `incident_status` is always populated).
+
+    This does not itself check `remediation_attempted` -- a `False` here is
+    correct-but-meaningless for an out-of-scope incident (it was never
+    going to be `RESOLVED` either way), so callers gate on
+    `remediation_attempted` first before counting this in the denominator,
+    exactly as `score_operational_run` below does.
+    """
+    return final_state.incident_status is IncidentStatus.RESOLVED
+
+
+def _ground_truth_recovers(scenario: FailureScenario, action_type: str) -> bool:
+    """Would `action_type` genuinely recover `scenario`, per its
+    `remediation_effects` ground truth?
+
+    Mirrors `backend.agents.action_executor_node._execute_high_impact_action`'s
+    own `outcome` decision exactly (`matched_correct and targets`) by
+    importing `is_correct_remediation` directly from that module (the same
+    "single shared helper, two call sites" pattern already used for
+    `resolve_on_correct_targets` below), rather than re-typing the
+    equivalent expression here -- so this scoring function and the real
+    executor structurally cannot drift apart on what "correct" means, even
+    if the executor's definition ever grows a second condition. This also
+    correctly scores a `slow_query`-shaped scenario (`correct_remediation
+    is None` -- see `RemediationEffects`'s docstring: "the one scenario
+    where no action ... actually resolves the incident") as "no action
+    ever recovers this": `is_correct_remediation` is always `False` there,
+    exactly matching the real executor's behavior.
+    """
+    effects = scenario.remediation_effects
+    targets = resolve_on_correct_targets(effects.on_correct or {}, scenario.affected_service)
+    return is_correct_remediation(scenario, action_type) and bool(targets)
+
+
+def recovery_check_matches_ground_truth(
+    db: Session, final_state: IncidentState, scenario: FailureScenario
+) -> bool | None:
+    """Did the Recovery Check's own `resolved`-vs-still-degraded call
+    (`final_state.recovery_result["outcome"]`) match simulation ground
+    truth for the specific action it verified?
+
+    `None` when this incident's run never reached a Recovery Check at all
+    (`final_state.recovery_result is None`) -- out of scope for
+    recovery-verification accuracy's denominator entirely, not scored as a
+    "wrong" call (see `OperationalRunResult`'s docstring). Ground truth is
+    looked up via `recovery_result["audit_event_id"]` -- the exact
+    `AuditEvent` Recovery Check verified this pass (see
+    `recovery_check_node`'s "most recently executed HIGH_IMPACT action"
+    query) -- rather than independently re-deriving which action to check,
+    so this genuinely scores the SAME decision Recovery Check made, not a
+    different one it could have made.
+
+    Only the LAST Recovery Check pass is scored, by construction:
+    `IncidentState.recovery_result` (`backend.agents.state`) is a single
+    dict, overwritten each pass of the bounded re-investigation loop, not
+    an accumulating list -- there is no persisted per-pass verdict for any
+    earlier pass to score against. `wrong_remediation_flags` below is the
+    metric that covers every attempt across the whole loop instead of just
+    the last one.
+
+    Raises:
+        ValueError: `recovery_result["audit_event_id"]` doesn't correspond
+            to a real `AuditEvent` row -- an inconsistent `final_state`/`db`
+            pairing (e.g. `db` from a different incident/rollback), not a
+            legitimate scoring outcome to silently swallow.
+    """
+    recovery_result = final_state.recovery_result
+    if recovery_result is None:
+        return None
+
+    event = db.get(AuditEvent, recovery_result["audit_event_id"])
+    if event is None:
+        raise ValueError(
+            f"recovery_result references AuditEvent {recovery_result['audit_event_id']!r} "
+            f"which does not exist -- inconsistent final_state/db for incident "
+            f"{final_state.incident_id!r}"
+        )
+
+    ground_truth_recovered = _ground_truth_recovers(scenario, event.action_type)
+    actual_recovered = recovery_result["outcome"] == "recovered"
+    return actual_recovered == ground_truth_recovered
+
+
+def wrong_remediation_flags(
+    db: Session, incident_id: int, scenario: FailureScenario
+) -> list[bool]:
+    """One `bool` per EXECUTED HIGH_IMPACT `AuditEvent` for `incident_id`,
+    oldest first: `True` iff that action did NOT actually recover the
+    scenario (`_ground_truth_recovers` is `False`) -- BUILD_PLAN.md's
+    wrong-remediation rate numerator.
+
+    Deliberately scoped to EXECUTED (a stronger condition than "reached
+    APPROVED") and to the WHOLE incident's history, not just its last pass:
+    BUILD_PLAN.md phrases this metric as "how often ... recommended (and
+    got executed) an action that didn't fix it" -- a per-ATTEMPT rate
+    across every pass of the bounded re-investigation loop, not a single
+    per-incident yes/no the way `remediation_succeeded`/
+    `recovery_check_matches_ground_truth` are. A two-pass incident (first
+    attempt ineffective, second attempt correct and resolves it)
+    contributes `[True, False]` here -- one wrong attempt counted, one
+    correct attempt counted -- rather than collapsing into a single "this
+    incident eventually succeeded" verdict, which would hide the wrong
+    first attempt entirely.
+
+    Callers aggregate the dataset-wide rate as `sum(every flag across every
+    incident) / len(every flag across every incident)` -- i.e. flatten
+    every incident's list into one pool of attempts first -- NOT by
+    averaging one list-per-incident as if each incident contributed exactly
+    one data point (`score_operational_run`'s docstring repeats this for
+    the harness author).
+    """
+    events = _high_impact_events(db, incident_id, frozenset({AuditDecisionStatus.EXECUTED}))
+    return [not _ground_truth_recovers(scenario, event.action_type) for event in events]
+
+
+class OperationalRunResult(NamedTuple):
+    """Per-incident operational-eval verdict for one full D closed-loop run
+    (`backend.graph.run_incident_graph`, NOT `run_incident_graph_to_diagnosis`)
+    -- the return shape for `score_operational_run`, the single entry point
+    a later harness step calls once per evaluated incident (mirrors
+    `backend.evaluation.harness.run_experiment_d`'s "one call per incident,
+    bundle every measurement into one `NamedTuple`" shape from that module,
+    rather than requiring four separate calls per incident).
+
+    `in_scope=False` means this incident's plan never had a HIGH_IMPACT
+    action reach APPROVED status (a SAFE-only plan, or a rejected
+    HIGH_IMPACT recommendation -- see module docstring's "denominator
+    crux" section) -- BUILD_PLAN.md routes rejection straight to
+    `manual_intervention_required` without ever executing anything, so
+    "remediation was attempted" is false. This incident must be excluded
+    from BOTH `remediation success rate`'s and `recovery-verification
+    accuracy`'s denominators entirely when aggregating across a dataset --
+    NOT counted as a failure of either metric. `recovered` and
+    `recovery_check_correct` are always `None` when `in_scope` is `False`,
+    precisely so a caller who forgets to gate on `in_scope` first gets an
+    obvious `TypeError`/`None`-in-arithmetic failure rather than a silently
+    wrong rate (an out-of-scope incident quietly counted as "not
+    recovered").
+
+    A caller aggregating this `NamedTuple` across a whole eval dataset
+    computes each of BUILD_PLAN.md's three rates as:
+
+    - **Remediation success rate** = `count(recovered is True)` /
+      `count(in_scope is True)`, over all incidents.
+    - **Recovery-verification accuracy** = `count(recovery_check_correct is
+      True)` / `count(recovery_check_correct is not None)`, over all
+      incidents.
+    - **Wrong-remediation rate** = `sum(len of every incident's
+      wrong_remediation_flags that are True)` / `sum(len of every
+      incident's wrong_remediation_flags)`, flattened across the whole
+      dataset first -- see `wrong_remediation_flags`'s own docstring for
+      why this is a per-attempt, not per-incident, rate.
+    """
+
+    in_scope: bool
+    recovered: bool | None
+    recovery_check_correct: bool | None
+    wrong_remediation_flags: list[bool]
+
+
+def score_operational_run(
+    db: Session, final_state: IncidentState, scenario: FailureScenario
+) -> OperationalRunResult:
+    """Score one full D closed-loop run (`backend.graph.run_incident_graph`)
+    against BUILD_PLAN.md's three operational-evaluation metrics.
+
+    `scenario` is the incident's `FailureScenario` (typically
+    `load_all_scenarios().get(incident.failure_type)`, the same lookup
+    `action_executor_node`/`recovery_check_node` themselves perform) --
+    this function does not load it itself so a caller scoring many
+    incidents against the same already-loaded `dict[str, FailureScenario]`
+    (from one `load_all_scenarios()` call) doesn't need to re-parse every
+    `failure_scenarios/*.yaml` file per incident.
+
+    See `OperationalRunResult`'s docstring for exactly how a caller
+    aggregates each field across many incidents into the three
+    dataset-level rates.
+    """
+    incident_id = final_state.incident_id
+    in_scope = remediation_attempted(db, incident_id)
+    return OperationalRunResult(
+        in_scope=in_scope,
+        recovered=remediation_succeeded(final_state) if in_scope else None,
+        recovery_check_correct=(
+            recovery_check_matches_ground_truth(db, final_state, scenario) if in_scope else None
+        ),
+        wrong_remediation_flags=wrong_remediation_flags(db, incident_id, scenario),
+    )
