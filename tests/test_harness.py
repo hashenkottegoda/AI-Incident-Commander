@@ -43,6 +43,7 @@ from backend.agents.state import IncidentState
 from backend.config import get_settings
 from backend.db import SessionLocal
 from backend.evaluation import experiment_a, harness
+from backend.evaluation.scoring import score_operational_run
 from backend.models.incident import IncidentStatus, Severity
 from backend.rag.qdrant_client import get_qdrant_client
 from backend.scripts.setup_checkpointer import to_psycopg_dsn
@@ -499,3 +500,255 @@ def TestClient_app_reset() -> TestClient:
     client = TestClient(app)
     client.post("/api/simulation/reset")
     return client
+
+
+# =============================================================================
+# run_experiment_d_operational -- the FULL closed loop, auto-approved
+# =============================================================================
+#
+# Unlike `run_experiment_d` above (which halts before response_planner ever
+# runs, via `run_incident_graph_to_diagnosis`'s static interrupt_before), this
+# calls the real `backend.graph.run_incident_graph` end-to-end and drives any
+# HIGH_IMPACT `human_approval` pause to completion itself (see
+# `run_experiment_d_operational`'s own docstring for why: unattended eval runs
+# need no human in the loop). So these fakes must cover response_planner
+# (and, for a HIGH_IMPACT plan, potentially several re-investigation passes)
+# for real -- `_patch_all_graph_fakes` above is diagnostic-only-shaped (its
+# planner fake exists only to prove response_planner is NEVER called) and
+# isn't reused here.
+
+
+def _make_multi_pass_investigation_fake(service: str, passes: int) -> _ScriptedChatModel:
+    """`passes` back-to-back repetitions of `_make_investigation_fake`'s
+    single-pass script (one turn issuing all 4 tool calls, one turn
+    concluding) -- each investigation pass through the bounded
+    re-investigation loop needs its own 2 scripted turns, and the SAME
+    `_ScriptedChatModel` instance is reused across every pass (the harness
+    tests' `lambda *a, **k: fake` monkeypatch convention returns one fixed
+    object regardless of how many times `ChatAnthropic(...)` is
+    constructed), so its `responses` list must hold `passes` copies up
+    front rather than just one."""
+    single_pass = _make_investigation_fake(service).responses
+    return _ScriptedChatModel(responses=list(single_pass) * passes)
+
+
+def _make_multi_pass_rca_fake(ground_truth_category: str, passes: int) -> _ScriptedChatModel:
+    """`passes` identical structured RCA results (same category, same
+    empty `alternative_hypotheses` so `confidence_gap_below_threshold`
+    never itself forces a reinvestigation -- the only loop trigger these
+    operational tests care about is `recovery_check_node`'s ineffective-
+    remediation loop, not root_cause's own gap check)."""
+    fake = _ScriptedChatModel(
+        responses=[_ai_message("rca", in_tok=80, out_tok=20) for _ in range(passes)]
+    )
+    diagnosis = DiagnosisResult(
+        root_cause_category=ground_truth_category,
+        hypotheses=[
+            Hypothesis(category=ground_truth_category, rationale="test", confidence=0.9)
+        ],
+        alternative_hypotheses=[],
+        evidence=[],
+        diagnostic_confidence=0.9,
+    )
+    for _ in range(passes):
+        fake.queue_structured_result(diagnosis)
+    return fake
+
+
+def _make_multi_pass_planner_fake(action_type: str, passes: int) -> _ScriptedChatModel:
+    """`passes` identical single-action `ResponsePlan`s, always
+    recommending the same `action_type` -- exercises exactly one
+    HIGH_IMPACT action per pass through response_planner, however many
+    passes the bounded re-investigation loop ends up taking."""
+    fake = _ScriptedChatModel(
+        responses=[_ai_message("plan", in_tok=15, out_tok=5) for _ in range(passes)]
+    )
+    plan = ResponsePlan(
+        actions=[
+            ResponseAction(
+                action_type=action_type,
+                expected_benefit="test remediation",
+                confidence=0.7,
+                llm_risk_assessment="test risk assessment",
+            )
+        ]
+    )
+    for _ in range(passes):
+        fake.queue_structured_result(plan)
+    return fake
+
+
+def _patch_operational_graph_fakes(
+    monkeypatch, service: str, ground_truth_category: str, action_type: str, *, passes: int
+):
+    """Patch `ChatAnthropic` in every LLM-calling node for a full
+    `run_incident_graph` run that recommends `action_type` on every one of
+    `passes` re-investigation passes. `passes=1` for a plan that resolves
+    (or is SAFE) on the first attempt; >1 for an ineffective HIGH_IMPACT
+    action expected to loop `backend.agents.recovery_check_node` back to a
+    fresh Investigation pass one or more times."""
+    import backend.agents.investigation_node as investigation_module
+    import backend.agents.response_planner_node as response_planner_module
+    import backend.agents.root_cause_node as rca_module
+    import backend.agents.triage_node as triage_module
+    from backend.agents.triage_node import TriageResult
+
+    # Triage only ever runs once -- recovery_check's loop routes straight
+    # back to "investigation", never back through "triage" (see
+    # backend/graph.py's edges).
+    triage_fake = _ScriptedChatModel(responses=[_ai_message("triage", in_tok=20, out_tok=5)])
+    triage_fake.queue_structured_result(TriageResult(affected_services=[service]))
+    monkeypatch.setattr(triage_module, "ChatAnthropic", lambda *a, **k: triage_fake)  # noqa: ARG005
+
+    investigation_fake = _make_multi_pass_investigation_fake(service, passes)
+    monkeypatch.setattr(
+        investigation_module, "ChatAnthropic", lambda *a, **k: investigation_fake  # noqa: ARG005
+    )
+
+    rca_fake = _make_multi_pass_rca_fake(ground_truth_category, passes)
+    monkeypatch.setattr(rca_module, "ChatAnthropic", lambda *a, **k: rca_fake)  # noqa: ARG005
+
+    planner_fake = _make_multi_pass_planner_fake(action_type, passes)
+    monkeypatch.setattr(
+        response_planner_module, "ChatAnthropic", lambda *a, **k: planner_fake  # noqa: ARG005
+    )
+
+
+async def test_run_experiment_d_operational_correct_remediation_resolves(
+    db, scenarios, monkeypatch
+):
+    """A HIGH_IMPACT plan recommending the scenario's real
+    `correct_remediation` (`db_connection_exhaustion`'s `rollback_deployment`,
+    same ground truth `tests/test_action_executor_recovery_check.py`'s (c)
+    case uses) should: genuinely pause at `human_approval` once, get
+    auto-approved by `run_experiment_d_operational` with no human/HTTP
+    caller involved, and resolve on the very first remediation attempt --
+    `score_operational_run` should then report `in_scope=True`,
+    `recovered=True`."""
+    scenario = scenarios["db_connection_exhaustion"]
+    assert scenario.remediation_effects.correct_remediation == "rollback_deployment"
+
+    client = TestClient_app_reset()
+    try:
+        incident_start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+        incident = inject_failure(db, scenario, random.Random(101), incident_start)
+        db.flush()
+        db.commit()  # the graph's own request-scoped session must see this incident
+
+        _patch_operational_graph_fakes(
+            monkeypatch,
+            incident.service.name,
+            scenario.root_cause_category,
+            "rollback_deployment",
+            passes=1,
+        )
+
+        final_state = await harness.run_experiment_d_operational(
+            db, incident, qdrant_client=get_qdrant_client(), approver="eval-harness-test"
+        )
+
+        assert final_state.incident_status == IncidentStatus.RESOLVED
+
+        result = score_operational_run(db, final_state, scenario)
+        assert result.in_scope is True
+        assert result.recovered is True
+        assert result.recovery_check_correct is True
+        assert result.wrong_remediation_flags == [False]
+    finally:
+        client.post("/api/simulation/reset")
+
+
+async def test_run_experiment_d_operational_ineffective_remediation_stays_degraded(
+    db, scenarios, monkeypatch
+):
+    """A HIGH_IMPACT plan that only ever recommends a known-ineffective
+    action (`cascading_payment_timeout`'s `scale_service`, same ground
+    truth `tests/test_action_executor_recovery_check.py`'s (d) case uses)
+    should loop through the bounded re-investigation loop
+    (`backend.agents.routing.MAX_REINVESTIGATION_LOOPS`, 3 total attempts:
+    investigation_iterations 1, 2, then 3 which exceeds the bound) with
+    `run_experiment_d_operational` auto-approving each of the 3 resulting
+    `human_approval` pauses in turn, and end at
+    `manual_intervention_required` -- never resolved.
+    `score_operational_run` should report `in_scope=True`,
+    `recovered=False`, and every attempt flagged wrong."""
+    scenario = scenarios["cascading_payment_timeout"]
+    assert "scale_service" in scenario.remediation_effects.ineffective_remediations
+
+    client = TestClient_app_reset()
+    try:
+        incident_start = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+        incident = inject_failure(db, scenario, random.Random(102), incident_start)
+        db.flush()
+        db.commit()
+
+        _patch_operational_graph_fakes(
+            monkeypatch,
+            incident.service.name,
+            scenario.root_cause_category,
+            "scale_service",
+            passes=3,
+        )
+
+        final_state = await harness.run_experiment_d_operational(
+            db, incident, qdrant_client=get_qdrant_client(), approver="eval-harness-test"
+        )
+
+        assert final_state.incident_status == IncidentStatus.MANUAL_INTERVENTION_REQUIRED
+        assert final_state.investigation_iterations == 3
+
+        result = score_operational_run(db, final_state, scenario)
+        assert result.in_scope is True
+        assert result.recovered is False
+        assert result.recovery_check_correct is True  # correctly called "still degraded"
+        assert result.wrong_remediation_flags == [True, True, True]
+    finally:
+        client.post("/api/simulation/reset")
+
+
+async def test_run_experiment_d_operational_safe_only_plan_never_pauses(
+    db, scenarios, monkeypatch
+):
+    """An all-SAFE plan (reusing `_patch_all_graph_fakes`'s canned
+    `generate_incident_report` action, the same fake `run_experiment_d`'s
+    own tests use) routes `response_planner -> action_executor` directly
+    (`backend/graph.py`'s conditional edge) -- `run_incident_graph`'s own
+    first call never pauses, so `run_experiment_d_operational` must return
+    that state as-is without ever calling `resume_incident_graph`. Proven
+    by monkeypatching `harness.resume_incident_graph` itself to raise if
+    called at all, rather than just asserting the final status (which
+    could coincidentally look right even if a spurious resume happened)."""
+
+    def _fail_if_called(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        raise AssertionError(
+            "resume_incident_graph must not be called for a SAFE-only plan -- "
+            "the graph never paused, so there is nothing to resume"
+        )
+
+    monkeypatch.setattr(harness, "resume_incident_graph", _fail_if_called)
+
+    client = TestClient_app_reset()
+    try:
+        scenario = scenarios["db_connection_exhaustion"]
+        incident_start = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+        incident = inject_failure(db, scenario, random.Random(103), incident_start)
+        db.flush()
+        db.commit()
+
+        _patch_all_graph_fakes(monkeypatch, incident.service.name, scenario.root_cause_category)
+
+        final_state = await harness.run_experiment_d_operational(
+            db, incident, qdrant_client=get_qdrant_client(), approver="eval-harness-test"
+        )
+
+        # SAFE-only: action_executor auto-executes with nothing left to
+        # verify, landing on DIAGNOSED (see action_executor_node's
+        # docstring) -- never AWAITING_APPROVAL, never RESOLVED.
+        assert final_state.incident_status == IncidentStatus.DIAGNOSED
+
+        result = score_operational_run(db, final_state, scenario)
+        assert result.in_scope is False
+        assert result.recovered is None
+        assert result.recovery_check_correct is None
+    finally:
+        client.post("/api/simulation/reset")

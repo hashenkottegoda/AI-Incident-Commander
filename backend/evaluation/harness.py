@@ -122,14 +122,22 @@ touching its nodes' internals.
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from langchain_core.tracers.context import collect_runs
 
 from backend.agents.investigator import investigate_incident
+from backend.agents.routing import MAX_REINVESTIGATION_LOOPS
 from backend.agents.schemas import DiagnosisResult
 from backend.evaluation.experiment_a import run_context_stuffing_baseline
-from backend.graph import run_incident_graph_to_diagnosis
+from backend.graph import (
+    get_incident_thread_state,
+    resume_incident_graph,
+    run_incident_graph,
+    run_incident_graph_to_diagnosis,
+)
+from backend.models import AuditDecisionStatus, AuditEvent
 
 if TYPE_CHECKING:
     from langchain_core.tracers.schemas import Run
@@ -368,3 +376,203 @@ async def run_experiment_d(
         total_input_tokens=input_tokens,
         total_output_tokens=output_tokens,
     )
+
+
+# =============================================================================
+# Operational evaluation (D only) -- driving the FULL closed loop
+# =============================================================================
+#
+# BUILD_PLAN.md's "Operational evaluation (D only)" section (quoted in full
+# in `backend.evaluation.scoring`'s module docstring) needs the real
+# Response Planner -> Risk Classifier -> HITL -> Action Executor -> Recovery
+# Check loop to have actually run, not `run_experiment_d`'s diagnostic-only
+# `run_incident_graph_to_diagnosis` above (which halts before any of that
+# starts, on purpose -- see that function's docstring). `scoring.
+# score_operational_run(db, final_state, scenario)` already knows how to
+# SCORE the result of that loop; nothing before this point in the codebase
+# actually DRIVES it unattended (the real driver is `POST /approve`, which
+# needs a human/HTTP caller in the loop by design). This section is that
+# missing driver, for eval purposes only.
+
+# Defensive circuit breaker against a genuine bug producing an infinite
+# pause/auto-approve cycle in `run_experiment_d_operational`'s loop below --
+# comfortably above the real bound the graph itself enforces
+# (`backend.agents.routing.MAX_REINVESTIGATION_LOOPS`, currently 2: each
+# bounded re-investigation pass can produce at most one fresh HIGH_IMPACT
+# recommendation needing its own approval round). Hitting this is a bug to
+# surface loudly (`RuntimeError`), not a legitimate incident outcome to
+# silently keep scoring.
+_MAX_APPROVAL_ROUNDS = MAX_REINVESTIGATION_LOOPS + 3
+
+
+def _auto_approve_pending_actions(db: Session, incident: Incident, approver: str) -> None:
+    """Harness-local stand-in for the APPROVED path of
+    `backend.api.approvals._decide_pending_actions` -- marks every
+    still-`PENDING_APPROVAL` `AuditEvent` row for `incident` as `APPROVED`/
+    `approver`/`decided_at` and commits, the same durable write that module
+    makes (per its own docstring: "This module is the sole writer of
+    AuditEvent.decision_status/.approver/.decided_at for a HIGH_IMPACT
+    action") before it goes on to resume the graph.
+
+    ## Why this is a harness-local rewrite, not a shared extraction out of
+    ## `_decide_pending_actions`, and not a direct call into that coroutine
+
+    Most of `_decide_pending_actions`'s real content is concurrency/replay
+    machinery this single-threaded, one-incident-at-a-time eval harness
+    structurally cannot exercise and so should not have to carry:
+
+    - `AuditEvent.version_id` optimistic-concurrency handling / the
+      `StaleDataError` catch -- guards against two *concurrent HTTP
+      requests* racing on the same incident's pending rows (see that
+      module's docstring). This harness never issues two concurrent writes
+      against the same incident; there is no race to guard against.
+    - `_retry_stuck_resume` -- recovers from a crash *between* the
+      `AuditEvent` commit and `resume_incident_graph` completing, so a
+      later duplicate `POST /approve` can still unstick the thread. A
+      harness run that crashes mid-call aborts the whole run; there is no
+      "later duplicate call" to retry from.
+    - `_already_decided_response`/the Pydantic `ApprovalResponse` shape --
+      an HTTP response contract this harness never returns to anyone. Its
+      caller (`run_experiment_d_operational`) already knows, from
+      `get_incident_thread_state`, that the thread is genuinely paused
+      with something pending -- there is no "was this already decided by
+      a different request" ambiguity here the way there is for a duplicate
+      HTTP call.
+
+    Reimplementing all of that machinery here just to reuse a few lines of
+    `UPDATE`-then-commit would add API-shaped complexity a harness run
+    never needs, not remove it. What IS genuinely shared and reused
+    directly, not duplicated, is the actual resume call itself --
+    `run_experiment_d_operational` calls the real
+    `backend.graph.resume_incident_graph` with the exact same
+    `Command(resume={"decision": "approved", "approver": approver})`
+    payload shape `backend.api.approvals` sends -- so the one piece of
+    behavior that genuinely must not drift between the real operational
+    path and eval (what a resume payload looks like to
+    `human_approval_node`) doesn't.
+    """
+    pending = (
+        db.query(AuditEvent)
+        .filter(
+            AuditEvent.incident_id == incident.id,
+            AuditEvent.decision_status == AuditDecisionStatus.PENDING_APPROVAL,
+        )
+        .order_by(AuditEvent.id)
+        .all()
+    )
+    now = datetime.now(UTC)
+    for event in pending:
+        event.decision_status = AuditDecisionStatus.APPROVED
+        event.approver = approver
+        event.decided_at = now
+    db.commit()
+
+
+async def run_experiment_d_operational(
+    db: Session,
+    incident: Incident,
+    *,
+    qdrant_client: QdrantClient | None = None,
+    approver: str = "eval-harness",
+) -> IncidentState:
+    """Drive Phase 6's FULL closed loop for one incident (Response Planner
+    -> Risk Classifier -> HITL -> Action Executor -> Recovery Check),
+    auto-approving any HIGH_IMPACT plan along the way so
+    `backend.evaluation.scoring.score_operational_run(db, final_state,
+    scenario)` has a genuinely-executed run to score -- see this module's
+    "Operational evaluation (D only)" section above for why nothing before
+    this function drove that loop unattended.
+
+    Calls `backend.graph.run_incident_graph` -- the real, unmodified,
+    end-to-end operational entry point -- NOT `run_incident_graph_to_
+    diagnosis` (`run_experiment_d`'s diagnostic-only entry point above,
+    which deliberately halts before Response Planner ever runs; see that
+    function's docstring for why that halt is correct for the diagnostic
+    comparison table and must stay that way). This function exists
+    precisely because the diagnostic path structurally cannot answer "did
+    the remediation work" -- it never runs one.
+
+    ## Detecting a genuine pause
+
+    After the initial run and after every resume, this function does NOT
+    infer "paused, needs approval" from `incident_status ==
+    AWAITING_APPROVAL` -- `backend.graph.get_incident_thread_state`'s own
+    docstring explains why that field alone is not proof of a real halt: it
+    is set by `response_planner_node` regardless of whether the graph
+    actually reached `interrupt()`. Instead this calls
+    `get_incident_thread_state(db, incident, qdrant_client=qdrant_client)`
+    and checks `snapshot.next == ("human_approval",)`, the same check
+    `tests/test_human_approval.py` uses to prove a genuine halt.
+
+    ## Looping until the incident genuinely stops pausing
+
+    A single `resume_incident_graph` call can itself run straight into
+    ANOTHER `human_approval` pause: BUILD_PLAN.md's bounded
+    re-investigation loop (`recovery_check -> investigation -> rag ->
+    root_cause -> response_planner -> human_approval` again) means an
+    ineffective first remediation attempt can produce a second HIGH_IMPACT
+    recommendation needing its own approval before the incident finally
+    resolves or exhausts its budget into `manual_intervention_required`
+    (see `tests/test_action_executor_recovery_check.py`'s ineffective-
+    remediation case for exactly this, driven through the real API). So
+    this function loops: check for a pause, auto-approve + resume if
+    paused, repeat, until `get_incident_thread_state` reports no pause left
+    -- bounded by `_MAX_APPROVAL_ROUNDS` purely as a defensive circuit
+    breaker (see that constant's docstring); hitting it raises
+    `RuntimeError` rather than hanging an eval run forever.
+
+    If the FIRST `run_incident_graph` call never pauses at all (an
+    all-SAFE plan routes `response_planner -> action_executor` directly,
+    per `backend/graph.py`'s conditional edge), the loop condition is never
+    true on its first check and `run_incident_graph`'s own final state is
+    returned unchanged -- nothing else to do, per this function's spec.
+
+    `incident.status` is kept in sync with each returned `final_state`
+    (`incident.status = final_state.incident_status`, followed by
+    `db.commit()`) after every resume, matching what
+    `backend.api.approvals._decide_pending_actions` does after its own
+    resume call. It's also synced after the very first `run_incident_graph`
+    call, before any pause/resume -- something the real
+    `POST /investigate/graph` path does not do, since `AuditEvent.
+    decision_status` (not `incident.status`) is the real gating signal
+    there (see `get_incident_thread_state`'s docstring). That extra sync is
+    harmless here (nothing in this module gates on `incident.status`) and
+    leaves the row more current for a caller who inspects `incident`
+    directly rather than only `final_state`.
+
+    Does NOT call `score_operational_run` itself -- scoring stays a
+    separate step the caller performs afterward, the same "produce a final
+    state, let the caller score it" separation `run_experiment_d`/
+    `diagnosis_result_from_state` already use on the diagnostic side (see
+    this module's own docstring: `scoring.py` is a distinct module from
+    this one throughout this codebase).
+    """
+    final_state = await run_incident_graph(db, incident, qdrant_client=qdrant_client)
+    incident.status = final_state.incident_status
+    db.commit()
+
+    rounds = 0
+    while True:
+        snapshot = await get_incident_thread_state(db, incident, qdrant_client=qdrant_client)
+        if snapshot.next != ("human_approval",):
+            return final_state
+
+        rounds += 1
+        if rounds > _MAX_APPROVAL_ROUNDS:
+            raise RuntimeError(
+                f"incident {incident.id} is still paused at human_approval after "
+                f"{_MAX_APPROVAL_ROUNDS} auto-approval rounds -- likely a genuine bug "
+                f"producing an infinite pause/approve cycle, not a legitimate bounded-"
+                f"loop outcome (the graph's own MAX_REINVESTIGATION_LOOPS is only "
+                f"{MAX_REINVESTIGATION_LOOPS})"
+            )
+
+        _auto_approve_pending_actions(db, incident, approver)
+        final_state = await resume_incident_graph(
+            db,
+            incident,
+            {"decision": "approved", "approver": approver},
+            qdrant_client=qdrant_client,
+        )
+        incident.status = final_state.incident_status
+        db.commit()
