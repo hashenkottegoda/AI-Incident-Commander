@@ -49,3 +49,6 @@ logs/
 # Misc caches / dbs
 *.sqlite3
 .cache/
+
+# Phase 7 eval runs (local benchmark output, not source)
+evaluation/results/
