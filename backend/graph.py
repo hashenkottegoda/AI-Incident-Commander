@@ -228,6 +228,95 @@ async def run_incident_graph(
     return IncidentState.model_validate(final_state)
 
 
+async def run_incident_graph_to_diagnosis(
+    db: Session,
+    incident: Incident,
+    *,
+    qdrant_client: QdrantClient | None = None,
+    database_url: str | None = None,
+) -> IncidentState:
+    """Run the graph through Root Cause ONLY, halting before Response
+    Planner ever executes -- Phase 7's diagnostic-only entry point
+    (`backend.evaluation.harness.run_experiment_d`), not used by the real
+    operational path.
+
+    BUILD_PLAN.md's "Diagnostic evaluation" section is explicit: *"every
+    experiment is scored immediately after the RCA stage, before any
+    response/remediation, so response planning can't inflate a diagnosis
+    score."* `run_incident_graph` above is the real end-to-end operational
+    path (Phase 6) and must keep running the full graph as-is -- it backs
+    the live API and Phase 6's own tests, which need Response Planner /
+    Human Approval / Action Executor / Recovery Check to actually run.
+
+    It was NOT safe to reuse for Phase 7's diagnostic eval, though, because
+    a single `await run_incident_graph(...)` call does NOT stop at Root
+    Cause: `response_planner` sits UNCONDITIONALLY between `root_cause` and
+    the `human_approval`/`action_executor` branch (see this module's graph
+    diagram above), so it always runs -- and always makes one real
+    `ChatAnthropic.with_structured_output(ResponsePlan)` call and writes
+    `AuditEvent` rows -- before `run_incident_graph` can return, regardless
+    of whether the proposed plan turns out SAFE-only (straight through to
+    `action_executor`) or HIGH_IMPACT (paused at `human_approval`'s
+    `interrupt()`). That extra call's latency and token usage would
+    silently leak into Phase 7's "immediately after RCA" comparison table
+    right alongside A/B/C, none of which ever run anything past their own
+    single diagnosis call -- a real apples-to-oranges skew against
+    Experiment D's latency/token-cost columns specifically (the
+    `root_cause_category`/evidence fields themselves are unaffected, since
+    no later node overwrites them -- see `root_cause_node`/
+    `response_planner_node`'s docstrings -- but latency and token cost are
+    scored metrics too, and BUILD_PLAN.md's sentence covers the whole
+    diagnostic scoring pass, not just accuracy).
+
+    The fix: compile the exact SAME graph (`build_incident_graph` -- no
+    forked nodes/edges) with `interrupt_before=["response_planner"]`,
+    LangGraph's native static-breakpoint mechanism. Deliberately
+    `interrupt_before=["response_planner"]`, NOT
+    `interrupt_after=["root_cause"]` -- an earlier version of this function
+    used the latter and it is WRONG: verified with a throwaway two-node
+    loop script that a static `interrupt_after=[node]` breakpoint fires
+    after *every* visit to that node, not just its final one. `root_cause`
+    is revisited on each pass of Phase 5's bounded re-investigation loop
+    (`route_after_root_cause` -> "reinvestigate" -> back to
+    `investigation`) -- `interrupt_after=["root_cause"]` would have halted
+    the graph after the FIRST root_cause pass, silently truncating the
+    reinvestigation loop entirely (never re-checking `cascading_payment_
+    timeout`'s evidence-sufficiency gap a second time) and scoring an
+    incomplete diagnosis. `response_planner` is only ever reached once, via
+    `route_after_root_cause`'s "end" branch, strictly AFTER the loop has
+    already fully resolved -- so `interrupt_before=["response_planner"]`
+    lets the entire bounded loop run to completion within one `ainvoke`
+    call (exactly matching what `run_incident_graph`'s full run would do up
+    to that point) and halts only once, at the correct boundary. Verified
+    against the installed `langgraph` build with a second throwaway script
+    (a looping two-node graph, `interrupt_before` on the downstream node)
+    before relying on it here.
+
+    Unlike `human_approval_node`'s dynamic `interrupt()` call (which pauses
+    mid-node and requires an explicit `Command(resume=...)` to continue), a
+    static `interrupt_before` boundary ahead of a not-yet-started node needs
+    no resume at all for this function's purposes: `ainvoke` runs the graph
+    up through the end of the reinvestigation loop, persists that
+    checkpoint, and returns the state as of right after `root_cause`'s
+    final pass completes -- `response_planner` never starts.
+
+    Uses a distinct thread_id (`f"{incident.id}-diagnostic-eval"`, not
+    `str(incident.id)`) so this function's checkpoint can never collide
+    with `run_incident_graph`/`resume_incident_graph`'s thread for the same
+    incident row -- an eval run and a real operational run against the
+    same incident id stay on fully independent threads.
+    """
+    dsn = to_psycopg_dsn(database_url or get_settings().database_url)
+    graph = build_incident_graph(db, qdrant_client)
+
+    async with AsyncPostgresSaver.from_conn_string(dsn) as saver:
+        compiled = graph.compile(checkpointer=saver, interrupt_before=["response_planner"])
+        config = {"configurable": {"thread_id": f"{incident.id}-diagnostic-eval"}}
+        final_state = await compiled.ainvoke(initial_state(incident), config=config)
+
+    return IncidentState.model_validate(final_state)
+
+
 async def resume_incident_graph(
     db: Session,
     incident: Incident,

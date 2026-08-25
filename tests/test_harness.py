@@ -438,10 +438,19 @@ def _patch_all_graph_fakes(monkeypatch, service: str, ground_truth_category: str
         response_planner_module, "ChatAnthropic", lambda *a, **k: planner_fake  # noqa: ARG005
     )
 
-    # Expected token totals across all 5 LLM turns (triage:1, investigation:2,
-    # root_cause:1, response_planner:1).
-    expected_in = 20 + 100 + 50 + 80 + 15
-    expected_out = 5 + 10 + 10 + 20 + 5
+    # `run_experiment_d` calls `run_incident_graph_to_diagnosis`, which halts
+    # via `interrupt_before=["response_planner"]` -- `response_planner` must
+    # NEVER run (see that function's docstring for why reusing plain
+    # `run_incident_graph` would leak an extra real LLM call's tokens into
+    # this "immediately after RCA" measurement). `planner_fake` is patched
+    # in anyway (rather than left unpatched) specifically so this test can
+    # prove that by omission: expected totals below cover only the 4 LLM
+    # turns that SHOULD run (triage:1, investigation:2, root_cause:1) -- if
+    # a future change accidentally let response_planner run again, its
+    # scripted 15/5 tokens would silently inflate the real totals and this
+    # assertion would fail rather than staying quietly wrong.
+    expected_in = 20 + 100 + 50 + 80
+    expected_out = 5 + 10 + 10 + 20
     return expected_in, expected_out
 
 

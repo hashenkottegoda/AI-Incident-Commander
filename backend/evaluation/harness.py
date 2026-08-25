@@ -7,7 +7,10 @@ any of their signatures:
 - `backend.evaluation.experiment_a.run_context_stuffing_baseline` (A)
 - `backend.agents.investigator.investigate_incident` (B when
   `include_rag=False`, C when `include_rag=True`)
-- `backend.graph.run_incident_graph` (D)
+- `backend.graph.run_incident_graph_to_diagnosis` (D -- NOT
+  `run_incident_graph`; see `run_experiment_d`'s docstring below for why
+  the plain end-to-end operational entry point is unsafe to reuse for
+  diagnostic-only scoring)
 
 `scoring.py`'s `tool_call_efficiency` docstring names this module directly:
 *"B/C: the harness will need to make investigate_incident surface a
@@ -126,7 +129,7 @@ from langchain_core.tracers.context import collect_runs
 from backend.agents.investigator import investigate_incident
 from backend.agents.schemas import DiagnosisResult
 from backend.evaluation.experiment_a import run_context_stuffing_baseline
-from backend.graph import run_incident_graph
+from backend.graph import run_incident_graph_to_diagnosis
 
 if TYPE_CHECKING:
     from langchain_core.tracers.schemas import Run
@@ -319,7 +322,25 @@ def diagnosis_result_from_state(final_state: IncidentState) -> DiagnosisResult:
 async def run_experiment_d(
     db: Session, incident: Incident, *, qdrant_client: QdrantClient | None = None
 ) -> ExperimentRun:
-    """Wrap Experiment D (`run_incident_graph`) -- async, unlike A/B/C.
+    """Wrap Experiment D (`run_incident_graph_to_diagnosis`) -- async,
+    unlike A/B/C.
+
+    Calls `backend.graph.run_incident_graph_to_diagnosis`, NOT
+    `run_incident_graph` -- see that function's docstring for why: a plain
+    `run_incident_graph` call does not stop at Root Cause (`response_planner`
+    runs unconditionally right after it, before the graph can return in
+    either the SAFE or HIGH_IMPACT branch), which would leak an extra real
+    `ChatAnthropic` call's latency/tokens into this "immediately after RCA"
+    diagnostic measurement -- exactly what BUILD_PLAN.md's diagnostic-
+    evaluation section says must not happen ("scored immediately after the
+    RCA stage, before any response/remediation, so response planning can't
+    inflate a diagnosis score"). `run_incident_graph_to_diagnosis` compiles
+    the identical graph with `interrupt_before=["response_planner"]`, a
+    LangGraph static breakpoint that halts execution before
+    `response_planner` ever starts (see that function's docstring for why
+    `interrupt_after=["root_cause"]` was tried first and rejected -- it
+    fires after every pass of the Phase 5 re-investigation loop, not just
+    the final one).
 
     `tool_call_count` comes directly from
     `len(final_state.tool_call_log_ids)` (`backend.agents.state.
@@ -327,13 +348,15 @@ async def run_experiment_d(
     from counting `run_type == "tool"` runs the way A/B/C do -- see module
     docstring's "Tool-call counting" section. Latency and token usage are
     still captured via the same `collect_runs()` mechanism wrapped around
-    the whole `await run_incident_graph(...)` call, verified (via a second
-    throwaway script) to survive the `asyncio.Task` boundaries LangGraph's
-    async executor creates internally.
+    the whole `await run_incident_graph_to_diagnosis(...)` call, verified
+    (via a second throwaway script) to survive the `asyncio.Task`
+    boundaries LangGraph's async executor creates internally.
     """
     start = time.perf_counter()
     with collect_runs() as collector:
-        final_state = await run_incident_graph(db, incident, qdrant_client=qdrant_client)
+        final_state = await run_incident_graph_to_diagnosis(
+            db, incident, qdrant_client=qdrant_client
+        )
     latency = time.perf_counter() - start
 
     input_tokens, output_tokens = _aggregate_usage(collector.traced_runs)
