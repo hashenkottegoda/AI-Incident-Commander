@@ -9,6 +9,7 @@ layer in a later Phase 0 sub-step.
 """
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.approvals import router as approvals_router
 from backend.api.evaluation import router as evaluation_router
@@ -21,6 +22,27 @@ from backend.config import get_settings
 get_settings()
 
 app = FastAPI(title="AI Incident Commander")
+
+# Dev-only CORS: the Phase 8 React dashboard (Vite dev server, default
+# http://localhost:5173) runs on a different origin than this API
+# (http://localhost:8000), so the browser's fetch calls need CORS headers
+# or every request from the dashboard fails before it ever reaches a
+# route. Wide open (`allow_origins=["*"]`, all methods/headers) is fine
+# here on the same "no auth at this phase" MVP basis backend/api/
+# simulation.py's docstring already established for this project -- there
+# is no session/cookie-based auth anywhere yet for a permissive CORS
+# policy to put at risk, and BUILD_PLAN.md scopes real auth/RBAC out of
+# this project entirely (see BUILD_PLAN.md's Phase 9 "deliberately
+# deferred" list: "JWT/RBAC ... deliberately deferred to an optional final
+# phase, not core"). Revisit (restrict origins, drop `allow_credentials`)
+# before this API is ever exposed outside local dev.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(health_router)
 app.include_router(incidents_router)
