@@ -59,6 +59,25 @@ dashboard's detail views need exactly one call each incident:
 Both endpoints extend this existing router rather than a new file/module --
 matching this task's instruction and the fact that they're one more
 `Incident`-scoped concern alongside `/investigate`.
+
+## `GET /{incident_id}/progress` (Phase 8 step 2 of 3)
+
+Step 1 (committed separately) added `backend.models.node_progress.
+NodeProgressEvent` and instrumented every graph node
+(`backend.graph._with_progress`) to write one row per invocation. This is
+the read side: the ordered `node_name`/`started_at` list the dashboard
+polls to render a live investigation trace, deliberately its own route
+rather than a field folded into `IncidentDetail` above. `IncidentDetail` is
+a heavier, multi-source payload (checkpoint state plus the full audit
+trail) meant for a single per-incident detail view; a live trace is
+instead something the dashboard polls repeatedly *while an investigation
+might still be running*, so it gets a small, fast, single-table endpoint
+of its own rather than making every poll re-fetch (and re-serialize) the
+whole detail payload. 404s the same way every other `{incident_id}` route
+here does if the incident itself doesn't exist; a real incident with zero
+progress rows (never investigated) is a normal `200 []`, not an error --
+same "empty is not an error" precedent `investigation: null` already
+establishes for `GET /{incident_id}`.
 """
 
 from __future__ import annotations
@@ -82,6 +101,7 @@ from backend.models import (
     ExecutionOutcome,
     Incident,
     IncidentStatus,
+    NodeProgressEvent,
     RiskClassification,
     Severity,
 )
@@ -206,6 +226,20 @@ class AuditEventSummary(BaseModel):
         )
 
 
+class NodeProgressEventSummary(BaseModel):
+    """One `NodeProgressEvent` row (`backend/models/node_progress.py`) --
+    just `node_name`/`started_at`, matching that model's fields (`id`/
+    `incident_id` are the caller's own request context, not useful in the
+    response body)."""
+
+    node_name: str
+    started_at: datetime
+
+    @classmethod
+    def from_node_progress_event(cls, event: NodeProgressEvent) -> NodeProgressEventSummary:
+        return cls(node_name=event.node_name, started_at=event.started_at)
+
+
 class IncidentDetail(BaseModel):
     """`GET /{incident_id}`'s full response -- grouped into the same three
     sources described in the module docstring, not a flat namespace."""
@@ -303,6 +337,31 @@ async def get_incident(incident_id: int, db: Session = Depends(get_db)) -> Incid
         investigation=investigation,
         audit_events=[AuditEventSummary.from_audit_event(event) for event in audit_events],
     )
+
+
+@router.get("/{incident_id}/progress", response_model=list[NodeProgressEventSummary])
+def get_incident_progress(
+    incident_id: int, db: Session = Depends(get_db)  # noqa: B008
+) -> list[NodeProgressEventSummary]:
+    """The ordered live-trace progress log for `incident_id` -- one row per
+    graph-node invocation, oldest first, so a client can render it
+    top-to-bottom as a timeline. See module docstring for why this is a
+    dedicated lightweight route rather than a field on `GET /{incident_id}`,
+    and why a real incident with zero rows (never investigated) is a normal
+    `200 []`, not a 404. A resumed `/approve` call can legitimately produce
+    a second row for the same `node_name` (e.g. two `human_approval` rows)
+    -- see `backend.graph._with_progress`'s docstring -- so rows are
+    returned as-is, not deduplicated by node name.
+    """
+    _get_incident_or_404(incident_id, db)
+
+    events = (
+        db.query(NodeProgressEvent)
+        .filter(NodeProgressEvent.incident_id == incident_id)
+        .order_by(NodeProgressEvent.started_at, NodeProgressEvent.id)
+        .all()
+    )
+    return [NodeProgressEventSummary.from_node_progress_event(event) for event in events]
 
 
 @router.post("/{incident_id}/investigate", response_model=DiagnosisResult)

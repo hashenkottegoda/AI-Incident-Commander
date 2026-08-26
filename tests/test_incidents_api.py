@@ -297,3 +297,84 @@ async def test_get_incident_detail_while_paused_at_human_approval(monkeypatch):
         db.rollback()
         db.close()
         client.post("/api/simulation/reset")
+
+
+# --- GET /{incident_id}/progress (Phase 8 step 2) -----------------------------
+
+
+def test_get_incident_progress_unknown_id_returns_404():
+    response = client.get("/api/incidents/999999999/progress")
+
+    assert response.status_code == 404
+    assert "999999999" in response.json()["detail"]
+
+
+def test_get_incident_progress_with_no_graph_run_returns_empty_list():
+    """An incident that's been injected but never had any graph run against
+    it has no `NodeProgressEvent` rows -- same "empty is not an error"
+    precedent as `GET /{incident_id}`'s `investigation: null` case, so this
+    is a normal `200 []`, not a 404."""
+    client.post("/api/simulation/reset")
+    db = SessionLocal()
+    try:
+        scenario = load_all_scenarios()["db_connection_exhaustion"]
+        incident = inject_failure(
+            db, scenario, random.Random(5), datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
+        )
+        db.commit()
+
+        response = client.get(f"/api/incidents/{incident.id}/progress")
+        assert response.status_code == 200
+        assert response.json() == []
+    finally:
+        db.rollback()
+        db.close()
+        client.post("/api/simulation/reset")
+
+
+async def test_get_incident_progress_returns_rows_in_node_order(monkeypatch):
+    """Runs the full graph through a SAFE-only plan (LLM layer faked, per
+    `test_graph_response_planner_e2e.py`'s convention, reused here rather
+    than reinventing the fakes -- same pattern `tests/test_node_progress.py`
+    uses to prove the write side) and confirms the endpoint surfaces the
+    resulting `NodeProgressEvent` rows in oldest-first order."""
+    from backend.graph import run_incident_graph
+
+    client.post("/api/simulation/reset")
+    db = SessionLocal()
+    try:
+        incident, start, end = _inject_db_connection_exhaustion_incident(db)
+        plan = ResponsePlan(
+            actions=[
+                ResponseAction(
+                    action_type="generate_incident_report",
+                    expected_benefit="documents the diagnosis for the record",
+                    confidence=0.7,
+                    llm_risk_assessment="no risk, read-only",
+                )
+            ]
+        )
+        _patch_response_planner_fakes(monkeypatch, incident.service.name, start, end, plan)
+
+        await run_incident_graph(db, incident, qdrant_client=get_qdrant_client())
+
+        response = client.get(f"/api/incidents/{incident.id}/progress")
+        assert response.status_code == 200
+        body = response.json()
+
+        node_names = [row["node_name"] for row in body]
+        assert node_names == [
+            "triage",
+            "investigation",
+            "rag",
+            "root_cause",
+            "response_planner",
+            "action_executor",
+        ]
+        started_ats = [row["started_at"] for row in body]
+        assert started_ats == sorted(started_ats)
+        assert all(row.keys() == {"node_name", "started_at"} for row in body)
+    finally:
+        db.rollback()
+        db.close()
+        client.post("/api/simulation/reset")
