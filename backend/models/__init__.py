@@ -16,6 +16,7 @@ from backend.models.audit import (
 )
 from backend.models.deployment import Deployment
 from backend.models.incident import Incident, IncidentStatus, Severity
+from backend.models.node_progress import NodeProgressEvent
 from backend.models.service import Service
 from backend.models.telemetry import LogEntry, LogLevel, MetricPoint, TraceLite
 
@@ -29,6 +30,7 @@ __all__ = [
     "LogEntry",
     "LogLevel",
     "MetricPoint",
+    "NodeProgressEvent",
     "RiskClassification",
     "Service",
     "Severity",

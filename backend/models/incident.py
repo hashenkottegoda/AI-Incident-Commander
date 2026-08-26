@@ -26,6 +26,7 @@ from backend.db import Base
 
 if TYPE_CHECKING:
     from backend.models.audit import AuditEvent
+    from backend.models.node_progress import NodeProgressEvent
     from backend.models.service import Service
 
 
@@ -164,6 +165,11 @@ class Incident(Base):
     # Service's docstring — an audit row is meaningless without its
     # incident.
     audit_events: Mapped[list[AuditEvent]] = relationship(
+        back_populates="incident", cascade="all, delete-orphan"
+    )
+    # Phase 8's live-trace progress log (backend/models/node_progress.py).
+    # CASCADE via the FK; same reasoning as audit_events above.
+    node_progress_events: Mapped[list[NodeProgressEvent]] = relationship(
         back_populates="incident", cascade="all, delete-orphan"
     )
 

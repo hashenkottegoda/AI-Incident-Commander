@@ -62,6 +62,7 @@ inspect nodes/edges/predicates without ever invoking the graph.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -86,12 +87,54 @@ from backend.agents.routing import (
 from backend.agents.state import IncidentState
 from backend.agents.triage_node import make_triage_node
 from backend.config import get_settings
-from backend.models import IncidentStatus
+from backend.models import IncidentStatus, NodeProgressEvent
 from backend.rag.qdrant_client import get_qdrant_client
 from backend.scripts.setup_checkpointer import to_psycopg_dsn
 
 if TYPE_CHECKING:
     from backend.models import Incident
+
+
+def _with_progress(
+    db: Session, node_name: str, fn: Callable[[IncidentState], dict]
+) -> Callable[[IncidentState], dict]:
+    """Wrap a node function so it writes one `NodeProgressEvent` row before
+    running it -- Phase 8's live-trace write path (BUILD_PLAN.md: *"persist
+    each graph node's progress to Postgres as it runs and have the
+    dashboard poll that progress log"*). Applied once, centrally, to every
+    `graph.add_node(...)` call below rather than inside each node module --
+    purely additive instrumentation, so no individual node's own logic
+    changes.
+
+    Every node function in this graph is a plain sync `def node(state) ->
+    dict` (none are `async def` -- see `backend/agents/*_node.py`), so this
+    wrapper is sync too: it preserves the exact call signature LangGraph
+    already invokes (`fn(state)` in, partial-update `dict` out), it doesn't
+    turn a sync node async or vice versa. `db.add(...)` + `db.commit()`
+    (not `flush()`) so the row is durable immediately, independent of
+    whether the real node function that follows ends up committing,
+    rolling back, or raising -- a "this node started" row should survive
+    even if the node itself fails.
+
+    Interacts safely with `human_approval_node`'s `interrupt()` gate: per
+    that module's docstring, LangGraph re-executes an interrupted node
+    **from its start** when the graph resumes, so a resumed `/approve` call
+    causes this wrapper to write a second `human_approval` progress row
+    before `interrupt()` returns the resume value and the node finishes.
+    That's an accurate reflection of what actually happened (the node
+    genuinely started running twice -- once to pause, once to resume), and
+    an extra durable log-row write is exactly the kind of side effect
+    `interrupt()`'s safety rule permits (nothing *irreversible* happens
+    here -- see that module's docstring for the distinction) -- unlike
+    `AuditEvent` creation, there's no idempotency concern to defend against.
+    """
+
+    def wrapped(state: IncidentState) -> dict:
+        db.add(NodeProgressEvent(incident_id=state.incident_id, node_name=node_name))
+        db.commit()
+        return fn(state)
+
+    return wrapped
 
 
 def build_incident_graph(db: Session, qdrant_client: QdrantClient | None = None) -> StateGraph:
@@ -110,14 +153,26 @@ def build_incident_graph(db: Session, qdrant_client: QdrantClient | None = None)
     qdrant_client = qdrant_client or get_qdrant_client()
 
     graph = StateGraph(IncidentState)
-    graph.add_node("triage", make_triage_node())
-    graph.add_node("investigation", make_investigation_node(db))
-    graph.add_node("rag", make_rag_node(qdrant_client))
-    graph.add_node("root_cause", make_root_cause_node())
-    graph.add_node("response_planner", make_response_planner_node(db))
-    graph.add_node("human_approval", human_approval_node)
-    graph.add_node("action_executor", make_action_executor_node(db))
-    graph.add_node("recovery_check", make_recovery_check_node(db))
+    # Every node is wrapped in `_with_progress` (Phase 8's live-trace write
+    # path -- see that function's docstring) -- applied here, centrally,
+    # rather than inside each node module, so this is the ONLY place that
+    # needs to know about the progress log at all.
+    graph.add_node("triage", _with_progress(db, "triage", make_triage_node()))
+    graph.add_node(
+        "investigation", _with_progress(db, "investigation", make_investigation_node(db))
+    )
+    graph.add_node("rag", _with_progress(db, "rag", make_rag_node(qdrant_client)))
+    graph.add_node("root_cause", _with_progress(db, "root_cause", make_root_cause_node()))
+    graph.add_node(
+        "response_planner", _with_progress(db, "response_planner", make_response_planner_node(db))
+    )
+    graph.add_node("human_approval", _with_progress(db, "human_approval", human_approval_node))
+    graph.add_node(
+        "action_executor", _with_progress(db, "action_executor", make_action_executor_node(db))
+    )
+    graph.add_node(
+        "recovery_check", _with_progress(db, "recovery_check", make_recovery_check_node(db))
+    )
 
     graph.add_edge(START, "triage")
     graph.add_edge("triage", "investigation")
