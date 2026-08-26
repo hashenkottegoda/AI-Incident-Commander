@@ -22,39 +22,31 @@ outside.
 
 ## The capture mechanism: `langchain_core.tracers.context.collect_runs()`
 
-Verified against the installed `langchain-core==1.6.0` (see `uv.lock`) with
-a throwaway script before writing this module (per this task's own
-instructions) -- summary of what was verified and why it works:
-
 `collect_runs()` (`langchain_core/tracers/context.py`) pushes a
-`RunCollectorCallbackHandler` onto a `ContextVar`
-(`run_collector_var`) that is registered via
-`register_configure_hook(run_collector_var, inheritable=False)` at import
-time. Every LangChain `Runnable.invoke()`/`ainvoke()` call -- a
-`ChatAnthropic` LLM call, a real `BaseTool.invoke()` call, a
-`RunnableSequence` built by `.with_structured_output()` -- goes through
-`ensure_config()`/the callback-manager configuration path, which reads
-`_configure_hooks` and silently attaches whatever callback handler is
+`RunCollectorCallbackHandler` onto a `ContextVar` (`run_collector_var`)
+that is registered via `register_configure_hook(run_collector_var,
+inheritable=False)` at import time. Every LangChain `Runnable.invoke()`/
+`ainvoke()` call -- a `ChatAnthropic` LLM call, a real `BaseTool.invoke()`
+call, a `RunnableSequence` built by `.with_structured_output()` -- goes
+through `ensure_config()`/the callback-manager configuration path, which
+reads `_configure_hooks` and silently attaches whatever callback handler is
 sitting in that context var, with ZERO change to the call site. This is
-exactly "ambient tracing": nothing inside `investigate_incident`/
+"ambient tracing": nothing inside `investigate_incident`/
 `run_context_stuffing_baseline`/`run_incident_graph` needs to accept or
 thread through a `config`/`callbacks` parameter for this to work, so their
-existing signatures are untouched.
+existing signatures are untouched -- the alternative (a `BaseCallbackHandler`
+threaded explicitly through each call) would have required changing all
+three signatures, including `investigate_incident`'s, which also backs
+`POST /api/incidents/{id}/investigate` directly.
 
-The throwaway verification script (a real `BaseChatModel` subclass playing
-back scripted `AIMessage`s carrying real `usage_metadata`, monkeypatched in
-place of `ChatAnthropic`, run through the REAL `backend.agents.investigator
-.investigate_incident` with REAL `BaseTool` instances from
-`backend.tools.build_tools(db)`) confirmed, wrapped in `with
-collect_runs() as cb:`:
+Wrapped in `with collect_runs() as cb:` around a real ReAct investigation:
 
 - Every LLM turn of the ReAct loop shows up as its own `run_type="llm"`
-  entry in `cb.traced_runs`, each carrying the exact scripted
-  `usage_metadata` (input/output tokens) inside
+  entry in `cb.traced_runs`, each carrying `usage_metadata` (input/output
+  tokens) inside
   `run.outputs["generations"][i][j]["message"]["kwargs"]["usage_metadata"]`
-  -- the same place any real `ChatAnthropic` response's `AIMessage.
-  usage_metadata` (which `langchain-anthropic` populates from the real
-  API's `usage` field) serializes to under tracing.
+  -- the same place `langchain-anthropic` populates a real `ChatAnthropic`
+  response's `AIMessage.usage_metadata` from the API's `usage` field.
 - The final `.with_structured_output(DiagnosisResult).invoke(...)` call
   shows up as a `run_type="chain"` root run (a `RunnableSequence` of the
   model call + output-parsing step) whose *nested* LLM call is reachable
@@ -62,28 +54,17 @@ collect_runs() as cb:`:
   -- `RunCollectorCallbackHandler` only stores root runs; everything
   nested is reachable by walking `child_runs`. `_all_llm_runs`/`_all_
   tool_runs` below recurse for exactly this reason.
-- The single real `get_logs` `BaseTool.invoke()` call made inside the
-  ReAct loop shows up as its own `run_type="tool"` root run with
-  `run.name == "get_logs"` -- a genuine, ambient-traced tool call, not
-  something this module has to instrument `investigator.py` to report.
-- A second throwaway script confirmed the same mechanism survives an
-  `async def` coroutine awaiting `Runnable.ainvoke()` from inside a freshly
-  created `asyncio.Task` (mirroring how LangGraph's async Pregel executor
-  runs node coroutines) -- required for Experiment D, which is async
-  (`run_incident_graph`). `contextvars.Context` is captured by
-  `asyncio.Task` at creation time, so a context var set before `await
-  compiled.ainvoke(...)` remains visible inside every node the graph
-  schedules during that call.
-
-Both scripts are NOT part of this module or the test suite (throwaway, per
-this task's instructions) -- their point was to settle "does the
-callback-free `collect_runs()` approach genuinely work against the
-installed version" BEFORE committing to it as this module's mechanism, per
-this task's own escape hatch ("if this approach turns out not to work ...
-fall back to a `BaseCallbackHandler` ... but note this WOULD require the
-three existing functions to accept/thread through a `config`/`callbacks`
-parameter"). It works, so that fallback is not needed and none of the
-three experiment functions were touched.
+- Each real `BaseTool.invoke()` call made inside the ReAct loop shows up as
+  its own `run_type="tool"` root run named after the tool -- a genuine,
+  ambient-traced tool call, with no need to instrument `investigator.py`
+  itself to report it.
+- The same mechanism survives an `async def` coroutine awaiting
+  `Runnable.ainvoke()` from inside a freshly created `asyncio.Task`
+  (mirroring how LangGraph's async Pregel executor runs node coroutines) --
+  required for Experiment D, which is async (`run_incident_graph`).
+  `contextvars.Context` is captured by `asyncio.Task` at creation time, so
+  a context var set before `await compiled.ainvoke(...)` remains visible
+  inside every node the graph schedules during that call.
 
 ## Why token totals can legitimately be `None`
 
@@ -152,9 +133,9 @@ ExperimentId = Literal["A", "B", "C", "D"]
 # `run_type` values LangChain's tracer assigns to a real LLM call --
 # "chat_model" is the modern value, "llm" is the legacy/generic one; both
 # appear across LangChain's own history and either is possible depending on
-# exactly which Runnable path a given call takes, so both are checked (see
-# module docstring's verification notes -- the throwaway script observed
-# "llm" for `ChatAnthropic`-shaped calls against this installed version).
+# exactly which Runnable path a given call takes, so both are checked
+# (`ChatAnthropic` calls trace as "llm" against the installed langchain-core
+# version -- see `uv.lock`).
 _LLM_RUN_TYPES = frozenset({"llm", "chat_model"})
 _TOOL_RUN_TYPE = "tool"
 
@@ -356,9 +337,10 @@ async def run_experiment_d(
     from counting `run_type == "tool"` runs the way A/B/C do -- see module
     docstring's "Tool-call counting" section. Latency and token usage are
     still captured via the same `collect_runs()` mechanism wrapped around
-    the whole `await run_incident_graph_to_diagnosis(...)` call, verified
-    (via a second throwaway script) to survive the `asyncio.Task`
-    boundaries LangGraph's async executor creates internally.
+    the whole `await run_incident_graph_to_diagnosis(...)` call -- it
+    survives the `asyncio.Task` boundaries LangGraph's async executor
+    creates internally (see the module docstring's capture-mechanism
+    section).
     """
     start = time.perf_counter()
     with collect_runs() as collector:

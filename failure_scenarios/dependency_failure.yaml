@@ -11,18 +11,12 @@
 #
 # Deliberately NOT framed as a timeout (contrast with
 # cascading_payment_timeout.yaml, root_cause_category
-# upstream_dependency_timeout): a live Phase 3 investigator run first
-# misdiagnosed this as `application_bug` (fixed by adding the missing
-# checkout_dependency_errors evidence, see injector.py's DEPENDENCY_ENTRIES),
-# then, once dependency evidence existed, misdiagnosed it as
-# upstream_dependency_timeout instead -- because the evidence tag/message
-# it shared with cascading_payment_timeout literally said "timed out",
-# which is a genuine, specific enough symptom description that an agent
-# reasonably (and correctly, given the evidence) concluded "timeout" over
-# "failure." The fix is evidence-level, not a scoring shortcut: this
-# scenario's provider failure is now described and evidenced as an error
-# response (payment_service_error_responses), not a timeout, so the two
-# categories are actually distinguishable by their own telemetry.
+# upstream_dependency_timeout): this scenario's dependency evidence
+# (checkout_dependency_errors, see injector.py's DEPENDENCY_ENTRIES) is
+# tagged and worded as an error response (payment_service_error_responses),
+# never "timed out" -- keeping the two categories distinguishable by their
+# own telemetry rather than by a shared symptom description an investigator
+# could reasonably conflate.
 #
 # correct_remediation reasoning (documented per BUILD_PLAN.md's ask, since
 # it's not the obvious "rollback" pick this time): the instability is

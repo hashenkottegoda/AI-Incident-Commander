@@ -325,27 +325,22 @@ async def run_incident_graph_to_diagnosis(
 
     The fix: compile the exact SAME graph (`build_incident_graph` -- no
     forked nodes/edges) with `interrupt_before=["response_planner"]`,
-    LangGraph's native static-breakpoint mechanism. Deliberately
-    `interrupt_before=["response_planner"]`, NOT
-    `interrupt_after=["root_cause"]` -- an earlier version of this function
-    used the latter and it is WRONG: verified with a throwaway two-node
-    loop script that a static `interrupt_after=[node]` breakpoint fires
-    after *every* visit to that node, not just its final one. `root_cause`
-    is revisited on each pass of Phase 5's bounded re-investigation loop
-    (`route_after_root_cause` -> "reinvestigate" -> back to
-    `investigation`) -- `interrupt_after=["root_cause"]` would have halted
+    LangGraph's native static-breakpoint mechanism. This must be
+    `interrupt_before=["response_planner"]`, NOT `interrupt_after=
+    ["root_cause"]`: a static `interrupt_after=[node]` breakpoint fires
+    after *every* visit to that node, not just its final one, and
+    `root_cause` is revisited on each pass of Phase 5's bounded
+    re-investigation loop (`route_after_root_cause` -> "reinvestigate" ->
+    back to `investigation`) -- `interrupt_after=["root_cause"]` would halt
     the graph after the FIRST root_cause pass, silently truncating the
-    reinvestigation loop entirely (never re-checking `cascading_payment_
-    timeout`'s evidence-sufficiency gap a second time) and scoring an
-    incomplete diagnosis. `response_planner` is only ever reached once, via
+    reinvestigation loop (never re-checking `cascading_payment_timeout`'s
+    evidence-sufficiency gap a second time) and scoring an incomplete
+    diagnosis. `response_planner` is only ever reached once, via
     `route_after_root_cause`'s "end" branch, strictly AFTER the loop has
     already fully resolved -- so `interrupt_before=["response_planner"]`
     lets the entire bounded loop run to completion within one `ainvoke`
     call (exactly matching what `run_incident_graph`'s full run would do up
-    to that point) and halts only once, at the correct boundary. Verified
-    against the installed `langgraph` build with a second throwaway script
-    (a looping two-node graph, `interrupt_before` on the downstream node)
-    before relying on it here.
+    to that point) and halts only once, at the correct boundary.
 
     Unlike `human_approval_node`'s dynamic `interrupt()` call (which pauses
     mid-node and requires an explicit `Command(resume=...)` to continue), a

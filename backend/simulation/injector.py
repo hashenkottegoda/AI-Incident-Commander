@@ -246,12 +246,10 @@ DISCRETE_EVENT_SPECS: dict[str, tuple[LogLevel, str, dict | None]] = {
 }
 
 # entry -> (downstream service name, log level, message template).
-# `checkout_dependency_errors` was added after a live Phase 3 investigator
-# run correctly diagnosed `application_bug` instead of
-# `upstream_dependency_failure` for dependency_failure.yaml: that scenario's
-# expected_evidence listed `checkout_dependency_errors` but its causal_chain
-# never actually generated it, so get_dependencies genuinely returned no
-# spans and the agent had no evidence of a downstream dependency at all.
+# `checkout_dependency_errors` must actually be generated for
+# dependency_failure.yaml, whose expected_evidence lists it: without a real
+# entry here, get_dependencies would return no spans at all for that
+# scenario, leaving no evidence of a downstream dependency to investigate.
 DEPENDENCY_ENTRIES: dict[str, tuple[str, LogLevel, str]] = {
     "checkout_retry_storm": (
         "payment-service",

@@ -176,23 +176,22 @@ class SourceRefVerdict(enum.Enum):
     """Three-way classification underlying `evidence_source_ref_is_valid`
     and the precision/hallucination-rate metrics.
 
-    An earlier version of this module scored a `query`-only citation under
-    a recognized DB-backed tool as unconditionally VALID ("the tool name
-    is real, benefit of the doubt on the rest"). Code review caught a real
-    gaming loophole in that: a model could cite every piece of fabricated
-    evidence via `query="..."` instead of `record_id=<N>` and never be
-    caught by `hallucination_rate`, since only `record_id` citations were
-    ever checked. "Unverifiable" and "valid" are not the same thing, and
-    collapsing them rewarded avoiding the one checkable field.
+    Scoring a `query`-only citation under a recognized DB-backed tool as
+    unconditionally VALID would open a real gaming loophole: a model could
+    cite every piece of fabricated evidence via `query="..."` instead of
+    `record_id=<N>` and never be caught by `hallucination_rate`, since only
+    `record_id` citations are checkable against real rows. "Unverifiable"
+    and "valid" are not the same thing, so this is a genuine third state
+    rather than a two-way valid/hallucinated split.
 
-    The fix: a genuine third state. `UNVERIFIABLE` citations are excluded
-    from both the numerator and the denominator of `evidence_precision` --
-    neither rewarded as grounded evidence nor punished as a fabrication,
-    since this module genuinely cannot re-execute a natural-language query
-    to confirm it reproduces the same result shape. This closes the
-    query-only loophole (it no longer inflates precision) without
-    penalizing the legitimate "queried and found nothing" case the same as
-    an outright fabrication.
+    `UNVERIFIABLE` citations are excluded from both the numerator and the
+    denominator of `evidence_precision` -- neither rewarded as grounded
+    evidence nor punished as a fabrication, since this module genuinely
+    cannot re-execute a natural-language query to confirm it reproduces the
+    same result shape. Excluding them (rather than counting them as valid)
+    is what prevents a model from gaming the metric by always citing
+    `query` instead of `record_id`, without penalizing the legitimate
+    "queried and found nothing" case the same as an outright fabrication.
     """
 
     VALID = "valid"
@@ -268,10 +267,10 @@ def classify_source_ref(db: Session, source_ref: SourceRef) -> SourceRefVerdict:
     natural-language query against the DB to verify it reproduces the same
     shape, so for the 4 DB-backed tools, a non-empty `query` string under a
     *recognized* tool name resolves to UNVERIFIABLE, not VALID -- see
-    `SourceRefVerdict`'s docstring for why an earlier version's "valid"
-    treatment here was a real scoring loophole (it let a model game
-    `hallucination_rate` by always citing `query` instead of `record_id`).
-    UNVERIFIABLE is excluded from `evidence_precision`'s denominator
+    `SourceRefVerdict`'s docstring for why treating this as "valid" would be
+    a real scoring loophole (it would let a model game `hallucination_rate`
+    by always citing `query` instead of `record_id`). UNVERIFIABLE is
+    excluded from `evidence_precision`'s denominator
     entirely, rather than being counted as either grounded or fabricated.
 
     This does NOT extend to `search_historical_incidents`, where `query` is
@@ -331,11 +330,10 @@ def evidence_precision(db: Session, result: DiagnosisResult) -> float:
     DB-backed tool -- see `classify_source_ref`) are excluded from both the
     numerator and the denominator: neither rewarded as grounded evidence
     nor punished as a fabrication, since this module genuinely cannot
-    re-execute a natural-language query to confirm it. Excluding them (as
-    opposed to an earlier version of this module that counted them as
-    valid) is what prevents a model from gaming this metric by always
-    citing `query` instead of `record_id` -- see `SourceRefVerdict`'s
-    docstring for the full reasoning.
+    re-execute a natural-language query to confirm it. Excluding them
+    (rather than counting them as valid) is what prevents a model from
+    gaming this metric by always citing `query` instead of `record_id` --
+    see `SourceRefVerdict`'s docstring for the full reasoning.
 
     ## Convention: no VERIFIABLE evidence at all -> 0.0, not 1.0 / not undefined
 

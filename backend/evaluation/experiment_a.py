@@ -85,18 +85,18 @@ here: BUILD_PLAN.md's Experiment A description names only
 
 `_assemble_context` queries logs/metrics/deployments for EVERY canonical
 service (`backend.simulation.scenario_schema.CANONICAL_SERVICES`), not
-only `incident.service.name`. This was a real bug in an earlier version
-of this module, caught in code review: `cascading_payment_timeout` and
-`dependency_failure` both have `affected_service: checkout-service`, but
-their actual root-cause evidence (payment-service's own latency ramp,
-timeout/error-response logs, canary-flag-enabled log) lives on
-payment-service -- both scenario YAML files document this explicitly as
-evidence "only visible by querying payment-service's own logs/metrics."
-Scoping the dump to one service structurally blinded Experiment A to that
-evidence for reasons unrelated to "no selective retrieval" (the actual
-architectural variable Phase 7 measures), which would have biased the
-A/B/C/D comparison for exactly the two scenarios BUILD_PLAN calls out as
-testing cross-service reasoning. `investigate_incident`'s tool-loop
+only `incident.service.name`. Scoping the dump to just the incident's
+nominal service would structurally blind Experiment A to cross-service
+root causes: `cascading_payment_timeout` and `dependency_failure` both have
+`affected_service: checkout-service`, but their actual root-cause evidence
+(payment-service's own latency ramp, timeout/error-response logs,
+canary-flag-enabled log) lives on payment-service -- both scenario YAML
+files document this explicitly as evidence "only visible by querying
+payment-service's own logs/metrics." Restricting the dump to one service
+would bias the A/B/C/D comparison for exactly the two scenarios BUILD_PLAN
+calls out as testing cross-service reasoning, for reasons unrelated to "no
+selective retrieval" (the actual architectural variable Phase 7 measures).
+`investigate_incident`'s tool-loop
 architectures (B/C/D) are not restricted to one service either -- their
 system prompt explicitly tells them to check services the affected
 service calls -- so querying all 3 services here keeps data ACCESS fair
