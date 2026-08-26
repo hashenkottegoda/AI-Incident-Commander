@@ -78,18 +78,30 @@ def confidence_gap_below_threshold(
     -- the evidence-sufficiency check is the other half of the disjunction
     and is what actually catches "not enough was investigated").
 
-    If there is no top hypothesis, or no alternative was recorded at all,
-    there is nothing to compare a gap against -- this returns False (does
-    not trigger via this path) rather than treating "no data" as
-    "insufficient confidence".
+    The RCA prompt instructs the model to put exactly one entry in
+    `hypotheses` and any runner-up in `alternative_hypotheses`, but nothing
+    in `DiagnosisResult`'s schema enforces that shape (it's shared across
+    Experiments A/B/C/D, which don't all follow this same convention) -- so
+    if the model ignores the instruction and ranks multiple candidates
+    inside `hypotheses` itself while leaving `alternative_hypotheses` empty,
+    `hypotheses[1]` is used as the runner-up fallback rather than silently
+    treating the diagnosis as having no runner-up at all.
+
+    If there is no top hypothesis, and no runner-up in either list, there is
+    nothing to compare a gap against -- this returns False (does not
+    trigger via this path) rather than treating "no data" as "insufficient
+    confidence".
     """
     if not state.hypotheses:
         return False
-    if not state.alternative_hypotheses:
-        return False
 
     top = state.hypotheses[0]
-    runner_up = state.alternative_hypotheses[0]
+    if state.alternative_hypotheses:
+        runner_up = state.alternative_hypotheses[0]
+    elif len(state.hypotheses) > 1:
+        runner_up = state.hypotheses[1]
+    else:
+        return False
 
     top_confidence = top.confidence if top.confidence is not None else state.diagnostic_confidence
     runner_up_confidence = runner_up.confidence if runner_up.confidence is not None else 0.0

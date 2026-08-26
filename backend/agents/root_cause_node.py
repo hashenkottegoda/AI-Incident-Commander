@@ -53,15 +53,17 @@ the evidence doesn't support it.
 Produce a structured diagnosis:
 - root_cause_category must be one of the fixed categories, or "unknown" if
   the evidence genuinely doesn't clearly support any of them.
-- hypotheses is ranked, most likely first; hypotheses[0].category must
-  equal root_cause_category. Populate each hypothesis's confidence
-  (0.0-1.0) with your own heuristic estimate for that specific hypothesis
-  -- this is compared against the runner-up's confidence to decide whether
-  more investigation is needed, so give it real thought rather than a
-  placeholder value.
-- alternative_hypotheses holds categories you seriously considered but did
-  not choose, each with its own rationale and confidence -- put your
-  strongest runner-up first.
+- hypotheses must contain EXACTLY ONE entry: your single chosen root cause,
+  with hypotheses[0].category equal to root_cause_category. Do not list
+  other candidates you considered here -- those belong in
+  alternative_hypotheses below. Populate its confidence (0.0-1.0) with your
+  own heuristic estimate -- this is compared against your strongest
+  runner-up's confidence to decide whether more investigation is needed, so
+  give it real thought rather than a placeholder value.
+- alternative_hypotheses must contain AT LEAST ONE entry whenever you
+  seriously considered more than one category (only leave it empty if
+  literally no other category was plausible) -- each with its own rationale
+  and confidence, strongest runner-up first.
 - evidence you cite must be grounded in the tool/source_ref combinations
   you were actually given above -- never invent a record id.
 - diagnostic_confidence is your own overall heuristic (0.0-1.0), not a

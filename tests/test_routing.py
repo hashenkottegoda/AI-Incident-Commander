@@ -105,6 +105,33 @@ def test_confidence_gap_custom_threshold():
     assert confidence_gap_below_threshold(state, threshold=0.5) is True
 
 
+def test_confidence_gap_falls_back_to_second_hypothesis_when_alternatives_empty():
+    """The RCA prompt asks the model to put exactly one entry in `hypotheses`
+    and any runner-up in `alternative_hypotheses`, but `DiagnosisResult`
+    doesn't enforce that shape -- if the model ranks multiple candidates
+    inside `hypotheses` itself instead, `hypotheses[1]` must still be used
+    as the runner-up rather than silently skipping the confidence-gap check.
+    """
+    state = IncidentState(
+        incident_id=1,
+        hypotheses=[_hyp(DB_POOL, 0.55), _hyp("unknown", 0.5)],
+        alternative_hypotheses=[],
+    )
+    assert confidence_gap_below_threshold(state) is True  # 0.55 - 0.5 = 0.05 < 0.15
+
+
+def test_confidence_gap_prefers_alternative_hypotheses_over_second_hypothesis():
+    """When both are present, `alternative_hypotheses[0]` -- the intended
+    runner-up field -- wins over `hypotheses[1]`, not the other way round.
+    """
+    state = IncidentState(
+        incident_id=1,
+        hypotheses=[_hyp(DB_POOL, 0.9), _hyp("unknown", 0.85)],
+        alternative_hypotheses=[_hyp("unknown", 0.2)],
+    )
+    assert confidence_gap_below_threshold(state) is False  # 0.9 - 0.2 = 0.7, decisive
+
+
 # --- evidence_sufficiency_check_failed --------------------------------------
 
 
