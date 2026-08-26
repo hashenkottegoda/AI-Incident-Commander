@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom'
 
 const NAV_ITEMS = [
   { label: 'Incidents', to: '/', disabled: false },
-  { label: 'Evaluation', to: '/evaluation', disabled: true },
+  { label: 'Evaluation', to: '/evaluation', disabled: false },
   { label: 'Health', to: '/health', disabled: false },
 ] as const
 
@@ -11,8 +11,7 @@ const NAV_ITEMS = [
  * Root page shell: a header/nav bar plus a content area. `App.tsx` renders
  * `<Layout><Routes>...</Routes></Layout>` directly (plain `children`, not
  * `react-router-dom`'s `<Outlet />` -- there's no nested-route layout here
- * to warrant it). "Evaluation" stays a disabled placeholder until that
- * page exists.
+ * to warrant it).
  */
 export function Layout({ children }: { children: ReactNode }) {
   return (
