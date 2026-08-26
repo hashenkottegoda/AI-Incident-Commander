@@ -1,15 +1,18 @@
 import type { ReactNode } from 'react'
+import { NavLink } from 'react-router-dom'
 
 const NAV_ITEMS = [
-  { label: 'Incidents', href: '#', disabled: false },
-  { label: 'Evaluation', href: '#', disabled: true },
+  { label: 'Incidents', to: '/', disabled: false },
+  { label: 'Evaluation', to: '/evaluation', disabled: true },
+  { label: 'Health', to: '/health', disabled: false },
 ] as const
 
 /**
- * Root page shell: a header/nav bar plus a content area. Deliberately
- * minimal at this scaffolding step -- the incident-list/detail/evaluation
- * pages slot into `children` in later steps, most of them behind real
- * client-side routing (not built yet, so nav links are placeholders).
+ * Root page shell: a header/nav bar plus a content area. `App.tsx` renders
+ * `<Layout><Routes>...</Routes></Layout>` directly (plain `children`, not
+ * `react-router-dom`'s `<Outlet />` -- there's no nested-route layout here
+ * to warrant it). "Evaluation" stays a disabled placeholder until that
+ * page exists.
  */
 export function Layout({ children }: { children: ReactNode }) {
   return (
@@ -23,19 +26,28 @@ export function Layout({ children }: { children: ReactNode }) {
             <span className="text-xs text-slate-500">investigation dashboard</span>
           </div>
           <nav className="flex gap-4 text-sm">
-            {NAV_ITEMS.map((item) => (
-              <span
-                key={item.label}
-                className={
-                  item.disabled
-                    ? 'cursor-not-allowed text-slate-600'
-                    : 'text-slate-300 hover:text-slate-50'
-                }
-                title={item.disabled ? 'Not built yet' : undefined}
-              >
-                {item.label}
-              </span>
-            ))}
+            {NAV_ITEMS.map((item) =>
+              item.disabled ? (
+                <span
+                  key={item.label}
+                  className="cursor-not-allowed text-slate-600"
+                  title="Not built yet"
+                >
+                  {item.label}
+                </span>
+              ) : (
+                <NavLink
+                  key={item.label}
+                  to={item.to}
+                  end={item.to === '/'}
+                  className={({ isActive }) =>
+                    isActive ? 'text-slate-50' : 'text-slate-300 hover:text-slate-50'
+                  }
+                >
+                  {item.label}
+                </NavLink>
+              ),
+            )}
           </nav>
         </div>
       </header>

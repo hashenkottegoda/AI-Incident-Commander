@@ -6,11 +6,13 @@
  * backend.main:app --reload` binds :8000) so the smoke-test page works
  * out of the box with no env setup.
  *
- * Only `fetchHealth` has a real caller so far (the health-check smoke
- * page). `listIncidents`/`getIncident`/`approveIncident`/`rejectIncident`/
- * `getEvaluationResults` are stubbed out now, against the exact response
- * shapes in `./types.ts`, so the incident-list/detail/evaluation pages
- * that come next don't need to re-derive the API contract.
+ * Every function here is a real call against the exact response shapes in
+ * `./types.ts` -- none of these are mocked or fake. `fetchHealth` (the
+ * health-check smoke page) and `listIncidents` (`IncidentListPage`) have
+ * real callers today; `getIncident`/`approveIncident`/`rejectIncident`/
+ * `getEvaluationResults` don't yet -- they're implemented ahead of the
+ * detail/approval/evaluation pages that will call them, so the API
+ * contract didn't need re-deriving when those pages get built.
  */
 
 import type {

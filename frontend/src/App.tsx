@@ -1,17 +1,23 @@
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { HealthCheckPage } from './pages/HealthCheckPage'
+import { IncidentListPage } from './pages/IncidentListPage'
 
 /**
- * Root component. No routing library yet -- this scaffolding step ships
- * exactly one real page (the backend health-check smoke test) inside the
- * shared Layout shell. Incident-list/detail/evaluation pages replace this
- * single-page wiring with real routes in later steps.
+ * Root component. `/` is the incident list (the dashboard's landing page);
+ * `/health` keeps the original backend-connectivity smoke test reachable
+ * as its own route now that it's no longer the only page.
  */
 function App() {
   return (
-    <Layout>
-      <HealthCheckPage />
-    </Layout>
+    <BrowserRouter>
+      <Layout>
+        <Routes>
+          <Route path="/" element={<IncidentListPage />} />
+          <Route path="/health" element={<HealthCheckPage />} />
+        </Routes>
+      </Layout>
+    </BrowserRouter>
   )
 }
 
