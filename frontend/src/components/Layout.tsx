@@ -2,9 +2,9 @@ import type { ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
 
 const NAV_ITEMS = [
-  { label: 'Incidents', to: '/', disabled: false },
-  { label: 'Evaluation', to: '/evaluation', disabled: false },
-  { label: 'Health', to: '/health', disabled: false },
+  { label: 'Incidents', to: '/' },
+  { label: 'Evaluation', to: '/evaluation' },
+  { label: 'Health', to: '/health' },
 ] as const
 
 /**
@@ -25,28 +25,18 @@ export function Layout({ children }: { children: ReactNode }) {
             <span className="text-xs text-slate-500">investigation dashboard</span>
           </div>
           <nav className="flex gap-4 text-sm">
-            {NAV_ITEMS.map((item) =>
-              item.disabled ? (
-                <span
-                  key={item.label}
-                  className="cursor-not-allowed text-slate-600"
-                  title="Not built yet"
-                >
-                  {item.label}
-                </span>
-              ) : (
-                <NavLink
-                  key={item.label}
-                  to={item.to}
-                  end={item.to === '/'}
-                  className={({ isActive }) =>
-                    isActive ? 'text-slate-50' : 'text-slate-300 hover:text-slate-50'
-                  }
-                >
-                  {item.label}
-                </NavLink>
-              ),
-            )}
+            {NAV_ITEMS.map((item) => (
+              <NavLink
+                key={item.label}
+                to={item.to}
+                end={item.to === '/'}
+                className={({ isActive }) =>
+                  isActive ? 'text-slate-50' : 'text-slate-300 hover:text-slate-50'
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
           </nav>
         </div>
       </header>

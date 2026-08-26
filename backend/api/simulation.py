@@ -19,11 +19,13 @@ from sqlalchemy.orm import Session
 
 from backend.db import get_db
 from backend.models import (
+    AuditEvent,
     Deployment,
     Incident,
     IncidentStatus,
     LogEntry,
     MetricPoint,
+    NodeProgressEvent,
     Severity,
     TraceLite,
 )
@@ -108,11 +110,18 @@ def create_failure(
 def reset_simulation(db: Session = Depends(get_db)) -> ResetResponse:  # noqa: B008
     """Delete all simulation-generated data so the demo can replay from a
     clean slate. Leaves the 3 canonical `Service` rows in place — they're
-    stable seed data, not something a demo run should have to re-seed."""
+    stable seed data, not something a demo run should have to re-seed.
+
+    `AuditEvent`/`NodeProgressEvent` rows are deleted explicitly (ahead of
+    `Incident`) rather than left to their `ondelete="CASCADE"` FK, purely so
+    their counts show up in the response body — cascade deletion alone
+    would remove them just as correctly, but silently, undercounting what
+    this endpoint reports it deleted."""
     deleted: dict[str, int] = {}
     # Order doesn't matter for FK integrity here: none of these tables
-    # reference each other, they only reference `services` (untouched).
-    for model in (Incident, TraceLite, LogEntry, MetricPoint, Deployment):
+    # reference each other, they only reference `incidents`/`services`.
+    models = (AuditEvent, NodeProgressEvent, Incident, TraceLite, LogEntry, MetricPoint, Deployment)
+    for model in models:
         result = db.execute(delete(model))
         deleted[model.__tablename__] = result.rowcount or 0
     db.commit()
