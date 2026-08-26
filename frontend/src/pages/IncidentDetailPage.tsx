@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ApiError, getIncident } from '../api/client'
+import { ApiError, approveIncident, getIncident, rejectIncident } from '../api/client'
 import type {
   AuditDecisionStatus,
   AuditEventSummary,
@@ -47,10 +47,13 @@ const RISK_STYLES: Record<RiskClassification, string> = {
  * (`incident`/`investigation`/`audit_events`) rendered as their own
  * sections, matching `IncidentDetail`'s shape rather than flattening it.
  *
- * Read-only display only: no approve/reject actions here (`POST /approve`
- * and `/reject` are a deliberately separate follow-up step) even though a
- * `pending_approval` audit row is rendered clearly so that step has
- * something to attach buttons to.
+ * The audit-trail table is read-only except for `pending_approval` rows
+ * classified `high_impact` -- those get Approve/Reject buttons wired to
+ * `POST /approve` and `/reject` (see `AuditEventsSection`). Both endpoints
+ * decide *every* currently-pending action for the incident in one call
+ * (see `backend/api/approvals.py`'s docstring), so the decision UI is
+ * incident-scoped, not per-row, even though it renders on each qualifying
+ * row.
  *
  * `investigation` is `null` whenever no LangGraph checkpoint exists yet for
  * this incident (an incident injected but never run through `/investigate`
@@ -75,19 +78,33 @@ function IncidentDetailPageForId({ id }: { id: string | undefined }) {
   // network round trip, so it's not something the fetch effect decides.
   const validId = Number.isFinite(incidentId)
   const [state, setState] = useState<LoadState>({ phase: 'loading' })
+  // Guards both the mount effect's fetch and any later manual `reload()`
+  // call (e.g. after an approve/reject decision) against setting state
+  // after unmount -- a single ref rather than a per-call local so a
+  // manual reload triggered late in the component's life still respects
+  // an unmount that happened after it started.
+  const cancelledRef = useRef(false)
 
-  useEffect(() => {
-    if (!validId) return
-
-    let cancelled = false
-
-    getIncident(incidentId)
+  // Shared by the initial mount fetch below and by the approve/reject flow
+  // in AuditEventsSection (via the `onDecided` prop) -- a decision mutates
+  // server state, so the honest way to reflect it is re-reading the same
+  // `GET /{incident_id}` this page already trusts, not patching local
+  // state with an optimistic guess. Returns the underlying promise (rather
+  // than being fire-and-forget) so `submitDecision` below can await the
+  // refetch actually landing before it clears its own submitting/confirming
+  // state -- otherwise a just-decided row would briefly render its live,
+  // clickable Approve/Reject buttons again for the duration of this round
+  // trip, using the still-stale `event.decision_status` the parent hasn't
+  // received the refetched `detail` for yet.
+  const reload = useCallback(() => {
+    if (!validId) return Promise.resolve()
+    return getIncident(incidentId)
       .then((detail) => {
-        if (cancelled) return
+        if (cancelledRef.current) return
         setState({ phase: 'loaded', detail })
       })
       .catch((fetchError: unknown) => {
-        if (cancelled) return
+        if (cancelledRef.current) return
         if (fetchError instanceof ApiError && fetchError.status === 404) {
           setState({ phase: 'not_found' })
           return
@@ -102,11 +119,15 @@ function IncidentDetailPageForId({ id }: { id: string | undefined }) {
                 : String(fetchError),
         })
       })
-
-    return () => {
-      cancelled = true
-    }
   }, [incidentId, validId])
+
+  useEffect(() => {
+    cancelledRef.current = false
+    reload()
+    return () => {
+      cancelledRef.current = true
+    }
+  }, [reload])
 
   return (
     <div className="flex flex-col gap-6">
@@ -152,12 +173,18 @@ function IncidentDetailPageForId({ id }: { id: string | undefined }) {
         </section>
       )}
 
-      {state.phase === 'loaded' && <LoadedIncident detail={state.detail} />}
+      {state.phase === 'loaded' && <LoadedIncident detail={state.detail} onDecided={reload} />}
     </div>
   )
 }
 
-function LoadedIncident({ detail }: { detail: IncidentDetail }) {
+function LoadedIncident({
+  detail,
+  onDecided,
+}: {
+  detail: IncidentDetail
+  onDecided: () => Promise<void>
+}) {
   const { incident, investigation, audit_events: auditEvents } = detail
 
   // `investigation.incident_status` is the graph's own live-checkpoint
@@ -220,14 +247,22 @@ function LoadedIncident({ detail }: { detail: IncidentDetail }) {
 
       <InvestigationSection investigation={investigation} />
 
-      <AuditEventsSection events={auditEvents} />
+      <AuditEventsSection events={auditEvents} incidentId={incident.id} onDecided={onDecided} />
     </>
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  children,
+  className,
+}: {
+  label: string
+  children: React.ReactNode
+  className?: string
+}) {
   return (
-    <div>
+    <div className={className}>
       <dt className="text-xs uppercase tracking-wide text-slate-500">{label}</dt>
       <dd className="mt-1 text-slate-200">{children}</dd>
     </div>
@@ -327,11 +362,21 @@ function InvestigationSection({ investigation }: { investigation: InvestigationS
               ? investigation.execution_result_id.join(', ')
               : investigation.execution_result_id}
         </Field>
-        <Field label="Recovery result">
+        <Field label="Recovery result" className="col-span-2 sm:col-span-3">
           {investigation.recovery_result === null ? (
             'n/a'
           ) : (
-            <KeyValueList record={investigation.recovery_result} />
+            // `recovery_result.checked_metrics` nests two levels deep
+            // (service:metric -> {baseline_mean, post_action_mean, ...} --
+            // see backend.agents.recovery_check_node._compare_to_baseline),
+            // and `KeyValueList` recurses to render that legibly rather
+            // than as one flat JSON blob. That real width doesn't fit this
+            // field's normal grid column, so this field spans the full
+            // row (className above) and scrolls horizontally within its
+            // own box (below) instead of overflowing the page.
+            <div className="max-w-full overflow-x-auto">
+              <KeyValueList record={investigation.recovery_result} />
+            </div>
           )}
         </Field>
       </dl>
@@ -422,13 +467,156 @@ function KeyValueList({ record }: { record: Record<string, unknown> }) {
   )
 }
 
-function AuditEventsSection({ events }: { events: AuditEventSummary[] }) {
+/** localStorage key remembering the last-used approver name across page
+ * loads/incidents -- there's no login in this MVP (BUILD_PLAN.md's
+ * explicit scope cut), so the approver identity is just a plain
+ * user-typed string, not a fake "logged in as" concept. Remembering it
+ * locally only saves retyping; it is never sent anywhere until the user
+ * actually clicks Approve/Reject. */
+const APPROVER_STORAGE_KEY = 'aic.approver'
+
+type PendingAction = 'approve' | 'reject'
+
+/** Incident-scoped decision UI state, not per-row -- `POST /approve` and
+ * `/reject` each decide *every* row still `pending_approval` for the
+ * incident in one call (backend/api/approvals.py), so all
+ * "Awaiting approval" rows share one confirm/submit/error state rather
+ * than tracking it per `AuditEvent.id`. */
+type DecisionState =
+  | { phase: 'idle' }
+  | { phase: 'confirming'; action: PendingAction }
+  | { phase: 'submitting'; action: PendingAction }
+  | { phase: 'error'; action: PendingAction; message: string }
+
+function AuditEventsSection({
+  events,
+  incidentId,
+  onDecided,
+}: {
+  events: AuditEventSummary[]
+  incidentId: number
+  onDecided: () => Promise<void>
+}) {
+  const hasAwaitingApproval = events.some(
+    (event) =>
+      event.risk_classification === 'high_impact' && event.decision_status === 'pending_approval',
+  )
+
+  const [approver, setApprover] = useState<string>(() => {
+    try {
+      return localStorage.getItem(APPROVER_STORAGE_KEY) ?? ''
+    } catch {
+      return '' // localStorage unavailable (private browsing etc.) -- not fatal.
+    }
+  })
+  const [decision, setDecision] = useState<DecisionState>({ phase: 'idle' })
+  const approverValid = approver.trim().length > 0
+  // Re-entrancy guard for `submitDecision`, separate from `decision` state:
+  // a plain `useRef` boolean is set/read synchronously in the same tick, so
+  // it's immune to React's render/commit timing in a way `decision.phase`
+  // is not -- two click events dispatched back-to-back before React commits
+  // a re-render would both close over the SAME pre-click `decision` value
+  // (since neither has re-rendered yet), so checking `decision.phase` alone
+  // cannot distinguish "the legitimate first call, now past the confirming
+  // gate" from "a second, re-entrant call using the same stale closure."
+  // This ref can, because it's mutated synchronously the instant the first
+  // call passes the guard, before any `await` or state update.
+  const submittingRef = useRef(false)
+
+  function updateApprover(value: string) {
+    setApprover(value)
+    try {
+      localStorage.setItem(APPROVER_STORAGE_KEY, value)
+    } catch {
+      // Not fatal -- just won't be remembered next time.
+    }
+  }
+
+  async function submitDecision(action: PendingAction) {
+    if (submittingRef.current) return
+    submittingRef.current = true
+
+    try {
+      const trimmedApprover = approver.trim()
+      if (trimmedApprover.length === 0) {
+        setDecision({ phase: 'error', action, message: 'Enter an approver name first.' })
+        return
+      }
+      setDecision({ phase: 'submitting', action })
+      try {
+        const call = action === 'approve' ? approveIncident : rejectIncident
+        const response = await call(incidentId, { approver: trimmedApprover })
+        // Await the refetch landing before clearing `submitting` -- otherwise
+        // this row would briefly render its live, clickable Approve/Reject
+        // buttons again (still reading the parent's now-stale
+        // `event.decision_status` prop) for the duration of this round trip.
+        await onDecided()
+        if (response.decision === 'already_decided') {
+          // Idempotent no-op path -- someone else (or an earlier stuck
+          // request) already decided this incident's pending action(s)
+          // before this call landed. Not an error in the HTTP sense, but
+          // it's not what this click asked for either, so it's surfaced
+          // rather than silently treated as success.
+          setDecision({
+            phase: 'error',
+            action,
+            message: `Already decided (by ${response.approver ?? 'someone else'}) before this request went through -- the page has been refreshed to show the current state.`,
+          })
+        } else {
+          setDecision({ phase: 'idle' })
+        }
+      } catch (submitError: unknown) {
+        setDecision({
+          phase: 'error',
+          action,
+          message:
+            submitError instanceof ApiError
+              ? submitError.message
+              : submitError instanceof Error
+                ? submitError.message
+                : String(submitError),
+        })
+      }
+    } finally {
+      // Reset on every exit path (empty-approver bail-out, success,
+      // already_decided, and network/HTTP error alike) so a later decision
+      // (e.g. after dismissing an error and retrying) isn't permanently
+      // locked out by a stale `true`.
+      submittingRef.current = false
+    }
+  }
+
   return (
     <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-6">
       <h2 className="text-lg font-semibold text-slate-50">Audit trail</h2>
       <p className="mt-1 text-sm text-slate-400">
         Every recommended action, its risk classification, and its approval/execution outcome.
       </p>
+
+      {hasAwaitingApproval && (
+        <div className="mt-4 flex flex-wrap items-end gap-3 rounded border border-amber-800 bg-amber-950/20 p-3">
+          <label className="flex flex-col gap-1 text-xs text-slate-300">
+            Approver
+            <input
+              type="text"
+              value={approver}
+              onChange={(event) => updateApprover(event.target.value)}
+              placeholder="your name or handle"
+              className="w-56 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-100 focus:border-slate-500 focus:outline-none"
+            />
+          </label>
+          <p className="max-w-md text-xs text-slate-500">
+            No login in this MVP -- this name is recorded verbatim as the approver on the audit
+            trail below. Remembered locally so you don't retype it next time.
+          </p>
+        </div>
+      )}
+
+      {decision.phase === 'error' && (
+        <p className="mt-3 rounded bg-red-950/50 p-3 text-sm text-red-300">
+          Couldn't {decision.action}: {decision.message}
+        </p>
+      )}
 
       {events.length === 0 ? (
         <p className="mt-4 rounded border border-dashed border-slate-700 p-6 text-center text-sm text-slate-400">
@@ -451,7 +639,15 @@ function AuditEventsSection({ events }: { events: AuditEventSummary[] }) {
             </thead>
             <tbody>
               {events.map((event) => (
-                <AuditEventRow key={event.id} event={event} />
+                <AuditEventRow
+                  key={event.id}
+                  event={event}
+                  decision={decision}
+                  approverValid={approverValid}
+                  onRequestConfirm={(action) => setDecision({ phase: 'confirming', action })}
+                  onCancelConfirm={() => setDecision({ phase: 'idle' })}
+                  onConfirm={(action) => void submitDecision(action)}
+                />
               ))}
             </tbody>
           </table>
@@ -461,9 +657,25 @@ function AuditEventsSection({ events }: { events: AuditEventSummary[] }) {
   )
 }
 
-function AuditEventRow({ event }: { event: AuditEventSummary }) {
+function AuditEventRow({
+  event,
+  decision,
+  approverValid,
+  onRequestConfirm,
+  onCancelConfirm,
+  onConfirm,
+}: {
+  event: AuditEventSummary
+  decision: DecisionState
+  approverValid: boolean
+  onRequestConfirm: (action: PendingAction) => void
+  onCancelConfirm: () => void
+  onConfirm: (action: PendingAction) => void
+}) {
   const awaitingApproval =
     event.risk_classification === 'high_impact' && event.decision_status === 'pending_approval'
+  const isSubmitting = decision.phase === 'submitting'
+  const isConfirming = decision.phase === 'confirming'
 
   return (
     <tr className="border-b border-slate-900 text-slate-200">
@@ -488,6 +700,54 @@ function AuditEventRow({ event }: { event: AuditEventSummary }) {
             </span>
           )}
         </div>
+        {awaitingApproval && (
+          <div className="mt-2">
+            {isConfirming ? (
+              <div className="flex max-w-xs flex-wrap items-center gap-2">
+                <span className="text-xs text-amber-200">
+                  {decision.action === 'approve'
+                    ? 'Approve? Runs simulated remediation (rollback/restart/scale against the simulation layer only, never anything real).'
+                    : 'Reject? Sends the incident to manual intervention; the investigation will not resume.'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onConfirm(decision.action)}
+                  className="rounded border border-emerald-700 bg-emerald-950/60 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-900/60"
+                >
+                  Confirm {decision.action}
+                </button>
+                <button
+                  type="button"
+                  onClick={onCancelConfirm}
+                  className="rounded border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isSubmitting || !approverValid}
+                  title={!approverValid ? 'Enter an approver name above first.' : undefined}
+                  onClick={() => onRequestConfirm('approve')}
+                  className="rounded border border-emerald-700 bg-emerald-950/60 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-900/60 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {isSubmitting && decision.action === 'approve' ? 'Approving…' : 'Approve'}
+                </button>
+                <button
+                  type="button"
+                  disabled={isSubmitting || !approverValid}
+                  title={!approverValid ? 'Enter an approver name above first.' : undefined}
+                  onClick={() => onRequestConfirm('reject')}
+                  className="rounded border border-red-800 bg-red-950/40 px-2 py-1 text-xs font-medium text-red-300 hover:bg-red-900/40 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {isSubmitting && decision.action === 'reject' ? 'Rejecting…' : 'Reject'}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </td>
       <td className="py-2 pr-4 text-slate-400">{event.approver ?? '—'}</td>
       <td className="py-2 pr-4 text-slate-400">{event.execution_outcome ?? '—'}</td>
