@@ -24,3 +24,25 @@ export function formatDetectedAt(iso: string): string {
   if (Number.isNaN(date.getTime())) return iso
   return dateFormatter.format(date)
 }
+
+/** Human-readable labels for `backend.graph.build_incident_graph`'s node
+ * names (`GET /{incident_id}/progress`'s `node_name` values) -- kept as a
+ * plain lookup, not a TS enum, matching that column's own "not constrained
+ * to today's set" design (see `backend/models/node_progress.py`'s
+ * docstring: the graph's node set is expected to keep growing). Any
+ * `node_name` not in this map still renders -- see `formatNodeName` --
+ * rather than the panel breaking on an unrecognized value. */
+const NODE_NAME_LABELS: Record<string, string> = {
+  triage: 'Triage',
+  investigation: 'Investigation',
+  rag: 'Historical Incident Search',
+  root_cause: 'Root Cause Analysis',
+  response_planner: 'Response Planning',
+  human_approval: 'Human Approval',
+  action_executor: 'Action Execution',
+  recovery_check: 'Recovery Check',
+}
+
+export function formatNodeName(nodeName: string): string {
+  return NODE_NAME_LABELS[nodeName] ?? nodeName
+}

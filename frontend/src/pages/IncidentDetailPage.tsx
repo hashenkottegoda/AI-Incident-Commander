@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ApiError, approveIncident, getIncident, rejectIncident } from '../api/client'
+import {
+  ApiError,
+  approveIncident,
+  getIncident,
+  getIncidentProgress,
+  rejectIncident,
+} from '../api/client'
 import type {
   AuditDecisionStatus,
   AuditEventSummary,
@@ -9,9 +15,10 @@ import type {
   IncidentDetail,
   IncidentStatus,
   InvestigationState,
+  NodeProgressEventSummary,
   RiskClassification,
 } from '../api/types'
-import { formatDetectedAt, SEVERITY_STYLES } from '../lib/incidentDisplay'
+import { formatDetectedAt, formatNodeName, SEVERITY_STYLES } from '../lib/incidentDisplay'
 
 type LoadState =
   | { phase: 'loading' }
@@ -41,6 +48,17 @@ const RISK_STYLES: Record<RiskClassification, string> = {
   safe: 'bg-slate-800/60 text-slate-300 border-slate-700',
   high_impact: 'bg-orange-950/60 text-orange-300 border-orange-800',
 }
+
+// `investigation.incident_status` values the graph checkpoint never leaves
+// once reached (backend/models/incident.py's IncidentStatus) -- the signal
+// LiveTraceSection uses to stop polling GET /{id}/progress. See that
+// component's docstring for the full stop-condition reasoning.
+const TERMINAL_INCIDENT_STATUSES: ReadonlySet<IncidentStatus> = new Set([
+  'resolved',
+  'manual_intervention_required',
+])
+
+const PROGRESS_POLL_INTERVAL_MS = 4000
 
 /**
  * `/incidents/:id` -- `GET /{incident_id}`'s three sources
@@ -194,6 +212,21 @@ function LoadedIncident({
   // backend/api/incidents.py -- and fall back to the DB status only when
   // there's no checkpoint at all.
   const currentPhase: IncidentStatus = investigation ? investigation.incident_status : incident.status
+  // LiveTraceSection's polling gate -- deliberately checks BOTH status
+  // sources, not just `investigation.incident_status` the way `currentPhase`
+  // above does. `POST /reject` is the reason why: it sets `incident.status`
+  // (the DB column) to `manual_intervention_required` directly and
+  // *never* resumes the paused graph thread (see backend/api/approvals.py's
+  // "Approve vs. reject: only approve touches the graph" section) -- so a
+  // rejected incident's checkpoint stays at `awaiting_approval` forever.
+  // Gating polling on the checkpoint status alone would poll forever after
+  // a rejection; checking the DB column too catches that case (and
+  // `resolved`, which likewise can be set without every consumer having
+  // re-read a fresh checkpoint).
+  const isInvestigationTerminal =
+    investigation !== null &&
+    (TERMINAL_INCIDENT_STATUSES.has(investigation.incident_status) ||
+      TERMINAL_INCIDENT_STATUSES.has(incident.status))
 
   return (
     <>
@@ -245,6 +278,12 @@ function LoadedIncident({
         </dl>
       </section>
 
+      <LiveTraceSection
+        incidentId={incident.id}
+        hasCheckpoint={investigation !== null}
+        isTerminal={isInvestigationTerminal}
+      />
+
       <InvestigationSection investigation={investigation} />
 
       <AuditEventsSection events={auditEvents} incidentId={incident.id} onDecided={onDecided} />
@@ -266,6 +305,251 @@ function Field({
       <dt className="text-xs uppercase tracking-wide text-slate-500">{label}</dt>
       <dd className="mt-1 text-slate-200">{children}</dd>
     </div>
+  )
+}
+
+type ProgressLoadState =
+  | { phase: 'loading' }
+  | { phase: 'error'; message: string }
+  | { phase: 'loaded'; events: NodeProgressEventSummary[] }
+
+/**
+ * `GET /{incident_id}/progress` rendered as a live-updating timeline --
+ * "how" the investigation got to its current state, which is why this sits
+ * above `InvestigationSection` (the "what it found" section) rather than
+ * inside or after it.
+ *
+ * This has its own fetch/poll cycle, independent of the one-shot
+ * `GET /{incident_id}` this whole page loads once (see `IncidentDetailPageForId`)
+ * -- per the progress endpoint's own docstring in backend/api/incidents.py,
+ * the entire point of it being a separate lightweight route is that a
+ * client can poll *it* repeatedly without re-fetching/re-serializing the
+ * full `IncidentDetail` payload on every tick. The two cycles only meet at
+ * one boundary: `hasCheckpoint`/`isTerminal`, two booleans derived from the
+ * parent's existing (non-polling) `investigation` + `incident` state, which
+ * this component reads to decide whether to keep polling at all -- see
+ * below.
+ *
+ * Stop condition: poll only while a checkpoint exists (`hasCheckpoint`) AND
+ * it's not yet terminal (`!isTerminal`). No checkpoint at all means no
+ * graph run has ever started for this incident, so there is nothing that
+ * could plausibly add a new progress row without an external trigger this
+ * page has no button for -- polling would just be repeatedly confirming the
+ * same empty list.
+ *
+ * `isTerminal` (computed in `LoadedIncident`) deliberately checks BOTH
+ * `investigation.incident_status` (the checkpoint) AND `incident.status`
+ * (the DB column) reaching `resolved`/`manual_intervention_required`, not
+ * just the checkpoint -- `POST /reject` sets only the DB column and
+ * *never* resumes the paused graph thread (backend/api/approvals.py), so a
+ * rejected incident's checkpoint is stuck at `awaiting_approval` forever.
+ * Checking the checkpoint alone would poll a rejected incident forever.
+ *
+ * Caveat this doesn't fully close: `isTerminal` is computed from the
+ * parent's `investigation`/`incident` snapshot, which (like the rest of
+ * this page) only refreshes on mount and after an approve/reject decision,
+ * not continuously. A SAFE-only plan (no human approval needed at all)
+ * reaches its own terminal state -- `incident.status = DIAGNOSED` via
+ * `action_executor_node`, graph `END` -- without any approve/reject click
+ * ever happening on this page to trigger a parent reload, and `DIAGNOSED`
+ * isn't in `TERMINAL_INCIDENT_STATUSES` (it's *also* a legitimate
+ * mid-investigation value, set by `root_cause_node` before
+ * `response_planner` even runs, so a dashboard can't treat it as terminal
+ * on its own). So this panel can keep polling a SAFE-only-resolved incident
+ * past its actual completion until something else triggers a parent
+ * reload or the user navigates away. A real fix needs a backend signal
+ * that unambiguously means "this graph run is done, full stop" (e.g. a
+ * dedicated terminal marker distinct from `DIAGNOSED`'s dual meaning) --
+ * out of scope for this read-only dashboard step; flagged rather than
+ * routed around.
+ */
+function LiveTraceSection({
+  incidentId,
+  hasCheckpoint,
+  isTerminal,
+}: {
+  incidentId: number
+  hasCheckpoint: boolean
+  isTerminal: boolean
+}) {
+  const [state, setState] = useState<ProgressLoadState>({ phase: 'loading' })
+  const isPolling = hasCheckpoint && !isTerminal
+
+  useEffect(() => {
+    // `cancelled` is a plain local, deliberately NOT a `useRef` shared
+    // across effect re-invocations (an earlier version of this effect used
+    // one, and it was a real bug: every time this effect re-runs -- e.g.
+    // React StrictMode's dev-only double-invoke, or `isPolling` itself
+    // flipping true -> false -- a SHARED ref gets reset back to `false` at
+    // the top of the new invocation. That un-cancels any still-in-flight
+    // `tick()` call left over from a PRIOR invocation whose `await` hadn't
+    // resolved yet: it wakes up, sees the shared flag is `false` again,
+    // concludes it's still valid, and schedules another `setTimeout` using
+    // its own stale closed-over `isPolling` (which may still be `true`) --
+    // a zombie poll chain nothing can ever cancel again, since every future
+    // cleanup only ever flips the SAME already-`true`-then-reset flag.
+    // Observed exactly this in manual testing: polling kept firing well
+    // after a `POST /reject` flipped `isTerminal` true. A `let` local here
+    // is scoped to THIS invocation only, so a prior invocation's closure
+    // keeps seeing ITS OWN `cancelled = true` from ITS OWN cleanup,
+    // regardless of how many newer invocations start afterward.
+    if (!hasCheckpoint) return
+
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    async function tick() {
+      try {
+        const events = await getIncidentProgress(incidentId)
+        if (cancelled) return
+        setState({ phase: 'loaded', events })
+      } catch (fetchError: unknown) {
+        if (cancelled) return
+        // Log and keep going -- a failed poll tick shouldn't tear down the
+        // rest of the page. If we already have rows on screen, leave them
+        // up rather than replacing them with an error; only show the
+        // inline "unavailable" note when we have nothing better to show.
+        console.error(`Failed to fetch progress for incident ${incidentId}`, fetchError)
+        setState((previous) =>
+          previous.phase === 'loaded'
+            ? previous
+            : {
+                phase: 'error',
+                message:
+                  fetchError instanceof ApiError
+                    ? fetchError.message
+                    : fetchError instanceof Error
+                      ? fetchError.message
+                      : String(fetchError),
+              },
+        )
+      } finally {
+        // Re-checked here (not just captured from the effect closure)
+        // doesn't matter for correctness since `isPolling` can't change
+        // mid-tick without this effect re-running first (it's a dependency
+        // below) -- but scheduling the *next* tick only when still polling,
+        // right here, is what makes the chain stop instead of a stray
+        // `setInterval` ticking forever after the incident resolves.
+        if (!cancelled && isPolling) {
+          timer = setTimeout(() => void tick(), PROGRESS_POLL_INTERVAL_MS)
+        }
+      }
+    }
+
+    void tick()
+
+    return () => {
+      cancelled = true
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [incidentId, isPolling, hasCheckpoint])
+
+  return (
+    <section className="rounded-lg border border-slate-800 bg-slate-900/40 p-6">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-lg font-semibold text-slate-50">Live investigation trace</h2>
+        {isPolling && (
+          <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" aria-hidden="true" />
+            Live -- polling every {PROGRESS_POLL_INTERVAL_MS / 1000}s
+          </span>
+        )}
+      </div>
+      <p className="mt-1 text-sm text-slate-400">
+        One row per graph-node invocation, oldest first -- how the investigation reached its current
+        state.
+      </p>
+
+      {!hasCheckpoint && (
+        <p className="mt-4 rounded border border-dashed border-slate-700 p-4 text-center text-sm text-slate-400">
+          No checkpoint exists for this incident yet, so there's no trace to show -- see Investigation
+          below.
+        </p>
+      )}
+
+      {hasCheckpoint && state.phase === 'loading' && (
+        <div className="mt-4 flex items-center gap-2 py-4 text-sm text-slate-400">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-slate-500" aria-hidden="true" />
+          Loading trace...
+        </div>
+      )}
+
+      {hasCheckpoint && state.phase === 'error' && (
+        <p className="mt-4 rounded bg-red-950/50 p-3 text-sm text-red-300">
+          Trace unavailable: {state.message}
+        </p>
+      )}
+
+      {hasCheckpoint && state.phase === 'loaded' && (
+        <ProgressTimeline events={state.events} isPolling={isPolling} />
+      )}
+    </section>
+  )
+}
+
+/** Renders progress rows as a vertical stepper. The most recent row is
+ * marked "current" only while `isPolling` is true (i.e. the checkpoint's
+ * phase isn't terminal) -- there's no `completed_at` on these rows to say
+ * otherwise (see `backend/models/node_progress.py`'s docstring), so "most
+ * recent row, investigation not yet terminal" is the same "currently
+ * running" inference the backend's own docstring describes. Once terminal
+ * (or mid-poll-failure but already resolved), every row renders as
+ * completed instead. */
+function ProgressTimeline({
+  events,
+  isPolling,
+}: {
+  events: NodeProgressEventSummary[]
+  isPolling: boolean
+}) {
+  if (events.length === 0) {
+    return (
+      <p className="mt-4 rounded border border-dashed border-slate-700 p-4 text-center text-sm text-slate-400">
+        Checkpoint exists but no node has recorded progress yet.
+      </p>
+    )
+  }
+
+  const lastIndex = events.length - 1
+
+  return (
+    <ol className="mt-4 flex flex-col">
+      {events.map((event, index) => {
+        const isCurrent = isPolling && index === lastIndex
+        return (
+          <li key={`${event.node_name}-${event.started_at}-${index}`} className="flex gap-3">
+            <div className="flex flex-col items-center">
+              <span
+                className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${
+                  isCurrent ? 'animate-pulse bg-emerald-500' : 'bg-slate-600'
+                }`}
+                aria-hidden="true"
+              />
+              {index < lastIndex && <span className="w-px flex-1 bg-slate-800" aria-hidden="true" />}
+            </div>
+            <div className="pb-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`text-sm font-medium ${isCurrent ? 'text-emerald-300' : 'text-slate-200'}`}
+                >
+                  {formatNodeName(event.node_name)}
+                </span>
+                {isCurrent ? (
+                  <span className="rounded border border-emerald-800 bg-emerald-950/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+                    Current
+                  </span>
+                ) : (
+                  <span className="text-xs text-emerald-600" aria-hidden="true">
+                    ✓
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-500">{formatDetectedAt(event.started_at)}</p>
+            </div>
+          </li>
+        )
+      })}
+    </ol>
   )
 }
 

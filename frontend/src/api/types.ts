@@ -7,7 +7,7 @@
  *   - backend/api/health.py       -> HealthResponse
  *   - backend/api/incidents.py    -> IncidentSummary, IncidentInfo,
  *                                     InvestigationState, AuditEventSummary,
- *                                     IncidentDetail
+ *                                     IncidentDetail, NodeProgressEventSummary
  *   - backend/agents/schemas.py   -> RootCauseCategory, SourceRef,
  *                                     EvidenceItem, Hypothesis
  *   - backend/api/approvals.py    -> ApprovalRequest, ApprovalResponse
@@ -143,6 +143,17 @@ export interface IncidentDetail {
   /** null means no LangGraph checkpoint exists yet for this incident (not an error). */
   investigation: InvestigationState | null
   audit_events: AuditEventSummary[]
+}
+
+/** One `GET /{incident_id}/progress` row -- a single graph-node invocation.
+ * No `completed_at`/status field by design (see
+ * `backend/models/node_progress.py`'s docstring): a client infers
+ * "currently running" from the most recent row (nothing after it yet) and
+ * "history in order" from the full list, already sorted oldest-first by
+ * the endpoint. */
+export interface NodeProgressEventSummary {
+  node_name: string
+  started_at: string
 }
 
 export interface ListIncidentsParams {

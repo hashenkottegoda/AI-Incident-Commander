@@ -23,6 +23,7 @@ import type {
   IncidentDetail,
   IncidentSummary,
   ListIncidentsParams,
+  NodeProgressEventSummary,
 } from './types'
 
 export const API_BASE_URL: string =
@@ -83,6 +84,18 @@ export function listIncidents(params: ListIncidentsParams = {}): Promise<Inciden
 /** `GET /api/incidents/{id}` -- incident + investigation state + audit trail. */
 export function getIncident(incidentId: number): Promise<IncidentDetail> {
   return apiFetch<IncidentDetail>(`/api/incidents/${incidentId}`)
+}
+
+/** `GET /api/incidents/{id}/progress` -- the ordered live-trace log (one row
+ * per graph-node invocation, oldest first). A real incident that was never
+ * investigated returns a normal `200 []`, not an error -- see this route's
+ * docstring in backend/api/incidents.py. Deliberately its own lightweight
+ * call rather than a field on `getIncident`'s response, since the dashboard
+ * polls this repeatedly while an investigation might still be running and
+ * shouldn't re-fetch/re-serialize the full `IncidentDetail` payload to do
+ * it. */
+export function getIncidentProgress(incidentId: number): Promise<NodeProgressEventSummary[]> {
+  return apiFetch<NodeProgressEventSummary[]>(`/api/incidents/${incidentId}/progress`)
 }
 
 /** `POST /api/incidents/{id}/approve` -- approve pending high-impact action(s). */
