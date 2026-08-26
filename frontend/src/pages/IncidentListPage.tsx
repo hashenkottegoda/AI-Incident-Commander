@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { ApiError, listIncidents } from '../api/client'
 import type { IncidentStatus, IncidentSummary } from '../api/types'
+import { formatDetectedAt, SEVERITY_STYLES } from '../lib/incidentDisplay'
 
 const PAGE_SIZE = 20
 
@@ -16,28 +18,10 @@ const STATUS_OPTIONS: IncidentStatus[] = [
   'manual_intervention_required',
 ]
 
-const SEVERITY_STYLES: Record<IncidentSummary['severity'], string> = {
-  P1: 'bg-red-950/60 text-red-300 border-red-800',
-  P2: 'bg-orange-950/60 text-orange-300 border-orange-800',
-  P3: 'bg-amber-950/60 text-amber-300 border-amber-800',
-  P4: 'bg-slate-800/60 text-slate-300 border-slate-700',
-}
-
-const dateFormatter = new Intl.DateTimeFormat(undefined, {
-  dateStyle: 'medium',
-  timeStyle: 'short',
-})
-
-function formatDetectedAt(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return iso
-  return dateFormatter.format(date)
-}
-
 /**
  * Landing page: `GET /api/incidents`, filterable by `?status=` and paged via
- * `limit`/`offset`. No row navigation yet -- `GET /{incident_id}` and the
- * detail view are a later step, so rows are visually inert.
+ * `limit`/`offset`. Rows link to `/incidents/:id` (`IncidentDetailPage`,
+ * backed by `GET /{incident_id}`).
  *
  * Status column caveat: `Incident.status` (the DB column this list reads)
  * only advances at action-execution/recovery/approval time -- the
@@ -213,26 +197,43 @@ export function IncidentListPage() {
 
 function IncidentRow({ incident }: { incident: IncidentSummary }) {
   return (
-    <tr
-      className="border-b border-slate-900 text-slate-200"
-      title="Detail view coming soon"
-    >
-      <td className="py-2 pr-4 font-mono text-slate-400">{incident.id}</td>
-      <td className="py-2 pr-4">
-        <span className="rounded border border-slate-700 bg-slate-800/60 px-2 py-0.5 text-xs">
-          {incident.status}
-        </span>
+    <tr className="border-b border-slate-900 text-slate-200 hover:bg-slate-900/60">
+      <td className="py-2 pr-4 font-mono text-slate-400">
+        <Link to={`/incidents/${incident.id}`} className="block hover:text-slate-50">
+          {incident.id}
+        </Link>
       </td>
       <td className="py-2 pr-4">
-        <span
-          className={`rounded border px-2 py-0.5 text-xs font-medium ${SEVERITY_STYLES[incident.severity]}`}
-        >
-          {incident.severity}
-        </span>
+        <Link to={`/incidents/${incident.id}`} className="block">
+          <span className="rounded border border-slate-700 bg-slate-800/60 px-2 py-0.5 text-xs">
+            {incident.status}
+          </span>
+        </Link>
       </td>
-      <td className="py-2 pr-4">{incident.failure_type}</td>
-      <td className="py-2 pr-4">{incident.service_name}</td>
-      <td className="py-2 pr-4 text-slate-400">{formatDetectedAt(incident.detected_at)}</td>
+      <td className="py-2 pr-4">
+        <Link to={`/incidents/${incident.id}`} className="block">
+          <span
+            className={`rounded border px-2 py-0.5 text-xs font-medium ${SEVERITY_STYLES[incident.severity]}`}
+          >
+            {incident.severity}
+          </span>
+        </Link>
+      </td>
+      <td className="py-2 pr-4">
+        <Link to={`/incidents/${incident.id}`} className="block">
+          {incident.failure_type}
+        </Link>
+      </td>
+      <td className="py-2 pr-4">
+        <Link to={`/incidents/${incident.id}`} className="block">
+          {incident.service_name}
+        </Link>
+      </td>
+      <td className="py-2 pr-4 text-slate-400">
+        <Link to={`/incidents/${incident.id}`} className="block">
+          {formatDetectedAt(incident.detected_at)}
+        </Link>
+      </td>
     </tr>
   )
 }
