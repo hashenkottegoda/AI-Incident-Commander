@@ -59,6 +59,9 @@ class _FakeStructuredLLM:
     def invoke(self, messages):  # noqa: ARG002
         return self._result
 
+    def with_retry(self, **kwargs):  # noqa: ARG002
+        return self
+
 
 def _make_fake_chat_openrouter(plan: ResponsePlan):
     class _FakeResponsePlannerChatOpenRouter:

@@ -74,6 +74,7 @@ from backend.agents.risk_classifier import (
     classify_risk,
 )
 from backend.agents.state import IncidentState
+from backend.agents.structured_output import TRANSIENT_OPENROUTER_ERRORS, invoke_structured
 from backend.config import get_settings
 from backend.models import AuditDecisionStatus, AuditEvent, IncidentStatus, RiskClassification
 
@@ -157,18 +158,26 @@ def make_response_planner_node(db: Session):
             api_key=settings.openrouter_api_key,
             max_tokens=2048,
         )
-        structured_llm = llm.with_structured_output(ResponsePlan)
+        # Free-tier OpenRouter models sit behind a shared, fluctuating-capacity
+        # pool -- transient 502/429 "upstream overloaded" responses are routine,
+        # not exceptional, and the openrouter SDK doesn't retry them internally
+        # for this response shape. Retry at the LangChain Runnable level instead,
+        # narrowed to the actually-transient error subset (see
+        # structured_output.TRANSIENT_OPENROUTER_ERRORS) -- a bad API key or
+        # oversized prompt should fail fast, not burn 5 backoff attempts first.
+        structured_llm = llm.with_structured_output(ResponsePlan).with_retry(
+            retry_if_exception_type=TRANSIENT_OPENROUTER_ERRORS, stop_after_attempt=5
+        )
 
         messages = [
             SystemMessage(content=RESPONSE_PLANNER_SYSTEM_PROMPT),
             HumanMessage(content=_build_planner_prompt(state)),
         ]
-        result = structured_llm.invoke(messages)
-
-        if not isinstance(result, ResponsePlan):
-            # with_structured_output's default "include_raw=False" should
-            # always return the parsed model; defensive guard only.
-            raise TypeError(f"expected ResponsePlan from structured output, got {type(result)!r}")
+        # Free-tier models occasionally ignore the forced tool_choice and
+        # reply with plain text instead -- the parser turns that into a
+        # silent `None` rather than an exception, so `.with_retry()` above
+        # never fires. Retry that case here too before giving up.
+        result = invoke_structured(structured_llm, messages, ResponsePlan)
 
         recommended_actions: list[dict] = []
         any_high_impact = False

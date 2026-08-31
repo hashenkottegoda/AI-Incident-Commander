@@ -35,6 +35,7 @@ from langchain_openrouter import ChatOpenRouter
 
 from backend.agents.schemas import DiagnosisResult
 from backend.agents.state import IncidentState
+from backend.agents.structured_output import TRANSIENT_OPENROUTER_ERRORS, invoke_structured
 from backend.config import get_settings
 from backend.models import IncidentStatus
 
@@ -66,6 +67,10 @@ Produce a structured diagnosis:
   and confidence, strongest runner-up first.
 - evidence you cite must be grounded in the tool/source_ref combinations
   you were actually given above -- never invent a record id.
+- evidence from search_historical_incidents must cite via source_ref.query
+  (the historical incident's string id, e.g. "hist-012"), never via
+  source_ref.record_id -- record_id is only for the integer-keyed
+  telemetry tools (get_logs/get_metrics/get_deployments/get_dependencies).
 - diagnostic_confidence is your own overall heuristic (0.0-1.0), not a
   calibrated probability.
 
@@ -111,20 +116,26 @@ def make_root_cause_node():
             api_key=settings.openrouter_api_key,
             max_tokens=4096,
         )
-        structured_llm = llm.with_structured_output(DiagnosisResult)
+        # Free-tier OpenRouter models sit behind a shared, fluctuating-capacity
+        # pool -- transient 502/429 "upstream overloaded" responses are routine,
+        # not exceptional, and the openrouter SDK doesn't retry them internally
+        # for this response shape. Retry at the LangChain Runnable level instead,
+        # narrowed to the actually-transient error subset (see
+        # structured_output.TRANSIENT_OPENROUTER_ERRORS) -- a bad API key or
+        # oversized prompt should fail fast, not burn 5 backoff attempts first.
+        structured_llm = llm.with_structured_output(DiagnosisResult).with_retry(
+            retry_if_exception_type=TRANSIENT_OPENROUTER_ERRORS, stop_after_attempt=5
+        )
 
         messages = [
             SystemMessage(content=RCA_SYSTEM_PROMPT),
             HumanMessage(content=_build_rca_prompt(state)),
         ]
-        result = structured_llm.invoke(messages)
-
-        if not isinstance(result, DiagnosisResult):
-            # with_structured_output's default "include_raw=False" should
-            # always return the parsed model; defensive guard only.
-            raise TypeError(
-                f"expected DiagnosisResult from structured output, got {type(result)!r}"
-            )
+        # Free-tier models occasionally ignore the forced tool_choice and
+        # reply with plain text instead -- the parser turns that into a
+        # silent `None` rather than an exception, so `.with_retry()` above
+        # never fires. Retry that case here too before giving up.
+        result = invoke_structured(structured_llm, messages, DiagnosisResult)
 
         existing_descriptions = {item.description for item in state.evidence}
         merged_evidence = list(state.evidence) + [

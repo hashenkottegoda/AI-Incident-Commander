@@ -110,6 +110,18 @@ def test_evidence_carries_structured_source_refs_not_raw_payloads():
     assert state.evidence[0].source_ref.record_id is None
 
 
+def test_source_ref_rescues_non_numeric_record_id_string_into_query():
+    """record_id is int-typed by design (see SourceRef's docstring) --
+    historical-incident citations belong in `query` as a string id like
+    "hist-012". Free-tier models periodically ignore the prompt rule and
+    put that string straight into record_id, which would otherwise raise
+    a ValidationError and crash the whole node. Confirm the before-validator
+    rescues it instead: record_id ends up None, query ends up "hist-012"."""
+    ref = SourceRef(tool="search_historical_incidents", record_id="hist-012")
+    assert ref.record_id is None
+    assert ref.query == "hist-012"
+
+
 def test_lifecycle_enum_values_match_build_plan_ordering():
     # Sanity check that the lifecycle this state's incident_status field
     # references still matches BUILD_PLAN.md's documented ordering -- a

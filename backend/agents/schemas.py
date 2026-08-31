@@ -26,9 +26,9 @@ types rather than convention:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # The 6 scenario `root_cause_category` values (`failure_scenarios/*.yaml`,
 # cross-checked against `tests/test_injector.py`) plus the escape hatch for
@@ -79,6 +79,31 @@ class SourceRef(BaseModel):
             "absence of a result rather than one specific record id."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _rescue_non_numeric_record_id(cls, data: Any) -> Any:
+        """Free-tier models occasionally cite historical-incident string ids
+        (e.g. "hist-012") via record_id instead of query, despite prompt
+        instructions to the contrary. record_id is int-typed by design (see
+        `SourceRef.record_id`'s docstring and qdrant_client.point_id_for's
+        comment); Pydantic's normal int coercion would raise ValidationError
+        on a non-numeric string and crash the whole node. Numeric strings
+        ("7") and real ints still go through normal coercion untouched --
+        only the unparseable case is rescued, by moving the value into
+        `query` (unless a real query is already set) and clearing record_id.
+        """
+        if isinstance(data, dict):
+            record_id = data.get("record_id")
+            if isinstance(record_id, str):
+                try:
+                    int(record_id)
+                except ValueError:
+                    data = dict(data)
+                    if not data.get("query"):
+                        data["query"] = record_id
+                    data["record_id"] = None
+        return data
 
 
 class EvidenceItem(BaseModel):

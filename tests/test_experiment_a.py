@@ -92,6 +92,9 @@ class _RecordingStructuredLLM:
         self._capture["invoke_count"] = self._capture.get("invoke_count", 0) + 1
         return self._result
 
+    def with_retry(self, **kwargs):  # noqa: ARG002
+        return self
+
 
 class _RecordingChatOpenRouter:
     """Fake `ChatOpenRouter` -- records every construction (proving no
@@ -147,26 +150,49 @@ def test_context_stuffing_baseline_dumps_real_telemetry_and_makes_one_llm_call(d
     # `checkout_deployment_v1.8.2`) appears verbatim, alongside its real
     # database id -- pulled back from Postgres rather than hardcoded, so
     # this stays correct if the injector's version-parsing ever changes.
-    deployment = db.execute(
-        select(Deployment).where(Deployment.service_id == incident.service_id)
-    ).scalars().first()
+    # `.order_by(id.desc())` because other test modules commit (not just
+    # flush) their own injected rows for this same service, so an unordered
+    # `.first()` can nondeterministically return a stale row from an earlier
+    # test instead of the one this test just injected -- the highest id is
+    # always this test's own freshly flushed row.
+    deployment = (
+        db.execute(
+            select(Deployment)
+            .where(Deployment.service_id == incident.service_id)
+            .order_by(Deployment.id.desc())
+        )
+        .scalars()
+        .first()
+    )
     assert deployment is not None
     assert deployment.version in prompt_text
     assert f"[id={deployment.id}]" in prompt_text
 
     # A real log row's id is inline and citable (connection_pool_exhausted
     # is an ERROR_CLUSTER entry, so this scenario always writes ERROR logs).
-    log_row = db.execute(
-        select(LogEntry).where(LogEntry.service_id == incident.service_id)
-    ).scalars().first()
+    log_row = (
+        db.execute(
+            select(LogEntry)
+            .where(LogEntry.service_id == incident.service_id)
+            .order_by(LogEntry.id.desc())
+        )
+        .scalars()
+        .first()
+    )
     assert log_row is not None
     assert f"[id={log_row.id}]" in prompt_text
     assert log_row.message in prompt_text
 
     # A real metric row's id is inline too (db_connections_active ramp).
-    metric_row = db.execute(
-        select(MetricPoint).where(MetricPoint.service_id == incident.service_id)
-    ).scalars().first()
+    metric_row = (
+        db.execute(
+            select(MetricPoint)
+            .where(MetricPoint.service_id == incident.service_id)
+            .order_by(MetricPoint.id.desc())
+        )
+        .scalars()
+        .first()
+    )
     assert metric_row is not None
     assert f"[id={metric_row.id}]" in prompt_text
 

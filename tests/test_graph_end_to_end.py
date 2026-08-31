@@ -81,6 +81,9 @@ class _FakeStructuredLLM:
     def invoke(self, messages):  # noqa: ARG002
         return self._result
 
+    def with_retry(self, **kwargs):  # noqa: ARG002
+        return self
+
 
 class _FakeTriageChatOpenRouter:
     """Stand-in for `triage_node.ChatOpenRouter` -- confirms the reported
@@ -155,6 +158,9 @@ def _make_fake_investigation_chat_openrouter(
                 ]
             return AIMessage(content="", tool_calls=tool_calls)
 
+        def with_retry(self, **kwargs):  # noqa: ARG002
+            return self
+
     class _FakeInvestigationChatOpenRouter:
         def __init__(self, *args, **kwargs):
             pass
@@ -224,6 +230,9 @@ def _make_fake_root_cause_chat_openrouter(counter: _RootCausePassCounter):
                 diagnostic_confidence=0.85,
                 evidence=[],
             )
+
+        def with_retry(self, **kwargs):  # noqa: ARG002
+            return self
 
     class _FakeRootCauseChatOpenRouter:
         def __init__(self, *args, **kwargs):

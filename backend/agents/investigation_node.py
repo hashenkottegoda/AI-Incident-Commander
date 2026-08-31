@@ -54,6 +54,7 @@ from sqlalchemy.orm import Session
 
 from backend.agents.schemas import EvidenceItem, SourceRef
 from backend.agents.state import IncidentState
+from backend.agents.structured_output import TRANSIENT_OPENROUTER_ERRORS
 from backend.config import get_settings
 from backend.models import IncidentStatus
 from backend.tools import build_tools
@@ -212,7 +213,16 @@ def make_investigation_node(db: Session):
             api_key=settings.openrouter_api_key,
             max_tokens=4096,
         )
-        llm_with_tools = llm.bind_tools(tools)
+        # Free-tier OpenRouter models sit behind a shared, fluctuating-capacity
+        # pool -- transient 502/429 "upstream overloaded" responses are routine,
+        # not exceptional, and the openrouter SDK doesn't retry them internally
+        # for this response shape. Retry at the LangChain Runnable level instead,
+        # narrowed to the actually-transient error subset (see
+        # structured_output.TRANSIENT_OPENROUTER_ERRORS) -- a bad API key or
+        # oversized prompt should fail fast, not burn 5 backoff attempts first.
+        llm_with_tools = llm.bind_tools(tools).with_retry(
+            retry_if_exception_type=TRANSIENT_OPENROUTER_ERRORS, stop_after_attempt=5
+        )
 
         messages: list[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT)]
         if state.evidence:

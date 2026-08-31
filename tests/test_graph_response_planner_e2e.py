@@ -84,6 +84,9 @@ class _FakeStructuredLLM:
     def invoke(self, messages):  # noqa: ARG002
         return self._result
 
+    def with_retry(self, **kwargs):  # noqa: ARG002
+        return self
+
 
 class _FakeTriageChatOpenRouter:
     def __init__(self, *args, **kwargs):
@@ -121,6 +124,9 @@ def _make_fake_investigation_chat_openrouter(service: str, start: str, end: str)
                 },
             ]
             return AIMessage(content="", tool_calls=tool_calls)
+
+        def with_retry(self, **kwargs):  # noqa: ARG002
+            return self
 
     class _FakeInvestigationChatOpenRouter:
         def __init__(self, *args, **kwargs):

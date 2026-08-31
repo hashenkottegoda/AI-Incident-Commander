@@ -290,6 +290,9 @@ class _FakeToolBoundLLM:
     def invoke(self, messages):  # noqa: ARG002 - signature-compatible stand-in
         return AIMessage(content="stub investigation summary, no tools called")
 
+    def with_retry(self, **kwargs):  # noqa: ARG002
+        return self
+
 
 class _FakeStructuredLLM:
     def __init__(self, result):
@@ -297,6 +300,9 @@ class _FakeStructuredLLM:
 
     def invoke(self, messages):  # noqa: ARG002 - signature-compatible stand-in
         return self._result
+
+    def with_retry(self, **kwargs):  # noqa: ARG002
+        return self
 
 
 class _FakeChatOpenRouter:

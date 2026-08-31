@@ -78,6 +78,7 @@ from langchain_openrouter import ChatOpenRouter
 from sqlalchemy.orm import Session
 
 from backend.agents.schemas import DiagnosisResult
+from backend.agents.structured_output import TRANSIENT_OPENROUTER_ERRORS, invoke_structured
 from backend.config import get_settings
 from backend.models import Incident
 from backend.rag.qdrant_client import get_qdrant_client
@@ -147,6 +148,10 @@ Rules:
   above; when the evidence is backed by one specific record, set
   source_ref.record_id to the exact `id` field from that tool call's JSON
   result -- never invent a record id that wasn't actually returned.
+- Evidence from search_historical_incidents must cite via source_ref.query
+  (the historical incident's string id, e.g. "hist-012"), never via
+  source_ref.record_id -- record_id is only for the integer-keyed
+  telemetry tools (get_logs/get_metrics/get_deployments/get_dependencies).
 - hypotheses[0].category should equal root_cause_category.
 - diagnostic_confidence is your own heuristic estimate (0.0-1.0), not a
   calibrated probability.
@@ -276,7 +281,16 @@ def investigate_incident(
         api_key=settings.openrouter_api_key,
         max_tokens=4096,
     )
-    llm_with_tools = llm.bind_tools(tools)
+    # Free-tier OpenRouter models sit behind a shared, fluctuating-capacity
+    # pool -- transient 502/429 "upstream overloaded" responses are routine,
+    # not exceptional, and the openrouter SDK doesn't retry them internally
+    # for this response shape. Retry at the LangChain Runnable level instead,
+    # narrowed to the actually-transient error subset (see
+    # structured_output.TRANSIENT_OPENROUTER_ERRORS) -- a bad API key or
+    # oversized prompt should fail fast, not burn 5 backoff attempts first.
+    llm_with_tools = llm.bind_tools(tools).with_retry(
+        retry_if_exception_type=TRANSIENT_OPENROUTER_ERRORS, stop_after_attempt=5
+    )
 
     messages: list[BaseMessage] = [
         SystemMessage(content=SYSTEM_PROMPT),
@@ -288,14 +302,14 @@ def investigate_incident(
     # Final structured-output call: same ChatOpenRouter instance (no tools
     # bound this time), through LangChain's structured-output binding --
     # never free-text parsing, never a raw provider SDK's messages.parse().
-    structured_llm = llm.with_structured_output(DiagnosisResult)
+    structured_llm = llm.with_structured_output(DiagnosisResult).with_retry(
+        retry_if_exception_type=TRANSIENT_OPENROUTER_ERRORS, stop_after_attempt=5
+    )
     messages.append(HumanMessage(content=STRUCTURED_OUTPUT_INSTRUCTION))
-    result = structured_llm.invoke(messages)
-
-    if not isinstance(result, DiagnosisResult):
-        # with_structured_output's default "include_raw=False" should always
-        # return the parsed model; this is a defensive guard, not an
-        # expected path.
-        raise TypeError(f"expected DiagnosisResult from structured output, got {type(result)!r}")
+    # Free-tier models occasionally ignore the forced tool_choice and reply
+    # with plain text instead -- the parser turns that into a silent `None`
+    # rather than an exception, so `.with_retry()` above never fires. Retry
+    # that case here too before giving up.
+    result = invoke_structured(structured_llm, messages, DiagnosisResult)
 
     return result
