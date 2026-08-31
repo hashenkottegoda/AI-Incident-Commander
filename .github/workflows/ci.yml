@@ -13,6 +13,12 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
 
+    # Matches docker-compose.yml's dev-only Postgres credentials (and
+    # backend/config.py's default) so the app/Alembic connect to the
+    # service container below without any extra setup.
+    env:
+      DATABASE_URL: postgresql+psycopg://incident_commander:incident_commander@localhost:5432/incident_commander
+
     # Matches docker-compose.yml's postgres service (same dev-only
     # credentials) so tests/test_db.py exercises real Postgres in CI
     # instead of always skipping.
@@ -50,6 +56,9 @@ jobs:
 
       - name: Lint (ruff)
         run: uv run ruff check .
+
+      - name: Apply database migrations
+        run: uv run alembic upgrade head
 
       - name: Test (pytest)
         run: uv run pytest
