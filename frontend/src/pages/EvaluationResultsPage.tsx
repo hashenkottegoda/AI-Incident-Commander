@@ -131,8 +131,8 @@ export function EvaluationResultsPage() {
             </code>
             <br />
             <span className="mt-2 inline-block text-xs text-slate-500">
-              This drives real Claude API calls for every incident across all four architectures --
-              expect real wall-clock time and real spend, per BUILD_PLAN.md's own cost note.
+              This drives real OpenRouter API calls for every incident across all four architectures --
+              expect real wall-clock time and rate-limited free-tier quota, per BUILD_PLAN.md's own cost note.
             </span>
           </p>
         </section>
