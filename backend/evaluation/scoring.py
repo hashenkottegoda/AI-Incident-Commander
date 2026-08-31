@@ -9,7 +9,7 @@ BUILD_PLAN.md's exact scoring definitions this module implements:
     equality); evidence precision = valid source_refs / total cited, checked
     against the tool-call log; hallucination rate = cited source_refs that
     don't correspond to any real tool output; plus tool-call efficiency,
-    latency, and token cost (from Claude API usage fields)."
+    latency, and token cost (from OpenRouter API usage fields)."
 
 ## No `ToolCallLog` table -- how "checked against the tool-call log" is done here
 
@@ -33,7 +33,7 @@ against the seeded `historical_incidents/historical_incidents.yaml` ids.
 
 - **Latency and token cost.** BUILD_PLAN.md groups these with tool-call
   efficiency in one sentence, but both require capturing wall-clock timing
-  and Claude API `usage` metadata *around an actual LLM call* -- that's the
+  and OpenRouter API `usage` metadata *around an actual LLM call* -- that's the
   job of the not-yet-built experiment runner
   (`backend.evaluation.run_experiments`, a later Phase 7 sub-step), not this
   pure-scoring module, which must stay callable with zero LLM calls and zero

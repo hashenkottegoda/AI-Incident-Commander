@@ -9,7 +9,7 @@ diagnostic table and a separate D operational table."*
 A thin file read. `backend.evaluation.run_experiments` (the
 `uv run python -m backend.evaluation.run_experiments --count N --seed S`
 CLI) is the thing that actually *runs* the four architectures against a
-seeded incident dataset — real Claude API calls, real wall-clock, real
+seeded incident dataset — real OpenRouter API calls, real wall-clock, real
 spend — and persists one JSON file per run under `evaluation/results/`
 (`run_seed{S}_count{N}_{timestamp}.json`, see that module's `_write_results`
 for the exact shape). This endpoint does nothing but locate the most
@@ -23,7 +23,7 @@ fast and side-effect-free, safe to poll from a dashboard.
 It never itself invokes `run_experiments.run_all`/`main` — there is no
 "trigger a new benchmark run over HTTP" surface here, deliberately. Kicking
 off a `--count 100` run is a deliberate, expensive, offline CLI action
-(BUILD_PLAN.md's own cost note: "a full 4x100 run is thousands of Claude
+(BUILD_PLAN.md's own cost note: "a full 4x100 run is thousands of OpenRouter
 calls at Opus pricing"); an HTTP endpoint that could accidentally be hit by
 a dashboard poll or a curious `curl` and silently start spending real money
 is the wrong shape for that action. Generating results stays a conscious,
@@ -89,7 +89,7 @@ router = APIRouter(prefix="/api/evaluation", tags=["evaluation"])
 # so tests can `monkeypatch.setattr(evaluation_module, "_RESULTS_DIR", tmp_path)`
 # to point this endpoint at an isolated directory -- the same
 # monkeypatch-the-module-under-test convention this codebase already uses
-# elsewhere (e.g. tests/test_harness.py monkeypatching `experiment_a.ChatAnthropic`).
+# elsewhere (e.g. tests/test_harness.py monkeypatching `experiment_a.ChatOpenRouter`).
 _RESULTS_DIR: Path = _DEFAULT_RESULTS_DIR
 
 

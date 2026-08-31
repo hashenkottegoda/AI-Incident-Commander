@@ -27,8 +27,8 @@ completes, hand off `INVESTIGATING`.
 
 from __future__ import annotations
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openrouter import ChatOpenRouter
 from pydantic import BaseModel, Field
 
 from backend.agents.state import IncidentState
@@ -95,13 +95,13 @@ def make_triage_node():
 
     def triage_node(state: IncidentState) -> dict:
         settings = get_settings()
-        # No temperature/top_p (these models reject sampling params) and an
-        # explicit max_tokens, matching investigator.py's conventions.
-        # max_tokens is small: this is a classification call, not a
-        # reasoning-heavy one.
-        llm = ChatAnthropic(
+        # No temperature/top_p override -- kept unset for consistent,
+        # prompt-driven behavior; explicit max_tokens, matching
+        # investigator.py's conventions. max_tokens is small: this is a
+        # classification call, not a reasoning-heavy one.
+        llm = ChatOpenRouter(
             model=settings.triage_model,
-            api_key=settings.anthropic_api_key,
+            api_key=settings.openrouter_api_key,
             max_tokens=512,
         )
         structured_llm = llm.with_structured_output(TriageResult)

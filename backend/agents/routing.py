@@ -23,7 +23,7 @@ from backend.models.incident import IncidentStatus
 
 # Threshold reasoning: `diagnostic_confidence`/`Hypothesis.confidence` are
 # self-reported 0.0-1.0 heuristics (BUILD_PLAN.md is explicit these are NOT
-# calibrated probabilities), and Claude's own estimates for this kind of
+# calibrated probabilities), and the model's own estimates for this kind of
 # task tend to cluster in the 0.5-0.85 range rather than spanning the full
 # scale. 0.15 is picked as a middle ground: small enough that a genuinely
 # decisive diagnosis (e.g. 0.85 vs 0.3) reliably passes without triggering

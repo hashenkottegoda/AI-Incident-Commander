@@ -14,7 +14,7 @@ telemetry is driven by the scenario's `remediation_effects`: applying the
 ## Zero LLM calls, by design
 
 Everything in this module is deterministic Python + SQL, no
-`ChatAnthropic`, no structured-output call. BUILD_PLAN.md: *"Because
+`ChatOpenRouter`, no structured-output call. BUILD_PLAN.md: *"Because
 `remediation_effects` is ground truth, both the recovery decision and the
 remediation-eval metrics are deterministic."* Which telemetry to write is
 decided by a plain string-equality check against

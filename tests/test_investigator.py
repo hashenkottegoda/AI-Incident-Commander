@@ -2,28 +2,29 @@
 all 6 failure types and confirm each `root_cause_category` matches ground
 truth.
 
-Makes REAL Claude API calls -- BUILD_PLAN.md Phase 3's own acceptance bar
-is literally "run the agent against all six failure types," not a mocked
-stand-in, so this test costs real money every time it runs. It is skipped
-automatically unless a real-looking `ANTHROPIC_API_KEY` is available, so
-the default fast `uv run pytest` suite never burns API credits by
-accident. Run it explicitly:
+Makes REAL OpenRouter API calls -- BUILD_PLAN.md Phase 3's own acceptance
+bar is literally "run the agent against all six failure types," not a
+mocked stand-in. Even though the configured models are free-tier, this
+still burns real, rate-limited OpenRouter quota and takes real wall-clock
+time, so it's skipped automatically unless a real-looking
+`OPENROUTER_API_KEY` is available. Run it explicitly:
 
     uv run pytest tests/test_investigator.py -v -s
 
 ## Why this reads `.env` directly instead of `get_settings()`
 
 `tests/conftest.py` unconditionally does
-`os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-dummy")` so every
+`os.environ.setdefault("OPENROUTER_API_KEY", "sk-test-dummy")` so every
 *other* test gets a harmless placeholder without needing a real key.
 Because that uses `setdefault` on the real *process* environment (not
 `.env`), and pydantic-settings prioritizes a real env var over the `.env`
 file, that placeholder would silently shadow the real key in `.env` for
-`get_settings()` -- checking `get_settings().anthropic_api_key` here would
-almost always see `"sk-test-dummy"` and skip for the wrong reason. Reading
-`.env` straight via `python-dotenv` sidesteps that shadowing entirely, and
-the `_real_api_key` fixture below scopes the override to just this
-module's tests via `monkeypatch` (auto-restored after each test).
+`get_settings()` -- checking `get_settings().openrouter_api_key` here
+would almost always see `"sk-test-dummy"` and skip for the wrong reason.
+Reading `.env` straight via `python-dotenv` sidesteps that shadowing
+entirely, and the `_real_api_key` fixture below scopes the override to
+just this module's tests via `monkeypatch` (auto-restored after each
+test).
 """
 
 from __future__ import annotations
@@ -42,8 +43,8 @@ from backend.scripts.setup_checkpointer import to_psycopg_dsn
 from backend.simulation.injector import inject_failure
 from backend.simulation.scenario_schema import load_all_scenarios
 
-_DOTENV_KEY = dotenv_values(".env").get("ANTHROPIC_API_KEY")
-_HAS_REAL_KEY = bool(_DOTENV_KEY) and _DOTENV_KEY.startswith("sk-ant-")
+_DOTENV_KEY = dotenv_values(".env").get("OPENROUTER_API_KEY")
+_HAS_REAL_KEY = bool(_DOTENV_KEY) and _DOTENV_KEY.startswith("sk-or-")
 
 
 def _postgres_reachable() -> bool:
@@ -59,8 +60,9 @@ pytestmark = [
     pytest.mark.skipif(
         not _HAS_REAL_KEY,
         reason=(
-            "No real ANTHROPIC_API_KEY found in .env -- these tests make live, "
-            "billed Claude API calls, so they are opt-in only."
+            "No real OPENROUTER_API_KEY found in .env -- these tests make live "
+            "OpenRouter API calls against rate-limited free-tier quota, so they "
+            "are opt-in only."
         ),
     ),
     pytest.mark.skipif(
@@ -83,7 +85,7 @@ ALL_FAILURE_TYPES = (
 def _real_api_key(monkeypatch):
     """Override conftest's placeholder key with the real one, scoped to
     this module's tests only (monkeypatch restores it after each test)."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", _DOTENV_KEY or "")
+    monkeypatch.setenv("OPENROUTER_API_KEY", _DOTENV_KEY or "")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

@@ -1,6 +1,6 @@
 """Live-Qdrant, zero-LLM test of Phase 5's RAG node (`backend/agents/rag_node.py`).
 
-This node makes no Claude API call (pure local embedding + Qdrant search,
+This node makes no OpenRouter API call (pure local embedding + Qdrant search,
 per BUILD_PLAN.md's Agent Architecture section and this task's cost
 constraint), so it's tested for real against a seeded Qdrant collection --
 no mocking needed, following `tests/test_rag.py`'s existing skip-without-

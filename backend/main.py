@@ -3,7 +3,7 @@
 Run with: `uv run uvicorn backend.main:app --reload`
 
 Settings are read once at import time (via `get_settings()`) so the app
-fails fast on a missing `ANTHROPIC_API_KEY` rather than at first use. No
+fails fast on a missing `OPENROUTER_API_KEY` rather than at first use. No
 DB/lifespan wiring yet — that lands with the SQLAlchemy models/session
 layer in a later Phase 0 sub-step.
 """

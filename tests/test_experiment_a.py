@@ -2,10 +2,10 @@
 the context-stuffing baseline: no tools, no ReAct loop, exactly one LLM
 call over a hand-assembled dump of all telemetry in a generous window.
 
-Follows `tests/test_graph_end_to_end.py`'s `_FakeChatAnthropic`/
-`_FakeStructuredLLM` convention: `ChatAnthropic` is monkeypatched with a
+Follows `tests/test_graph_end_to_end.py`'s `_FakeChatOpenRouter`/
+`_FakeStructuredLLM` convention: `ChatOpenRouter` is monkeypatched with a
 small fake that records what it was asked to invoke and returns a canned
-`DiagnosisResult`, so this suite makes zero real Anthropic API calls while
+`DiagnosisResult`, so this suite makes zero real OpenRouter API calls while
 still exercising the real prompt-assembly code and the real tool-layer
 queries against real seeded Postgres data.
 
@@ -79,7 +79,7 @@ _CANNED_RESULT = DiagnosisResult(
 
 
 class _RecordingStructuredLLM:
-    """Stand-in for `<ChatAnthropic instance>.with_structured_output(...)`'s
+    """Stand-in for `<ChatOpenRouter instance>.with_structured_output(...)`'s
     return value -- records every `.invoke()` call so the test can assert
     exactly one happened (no ReAct loop) and inspect exactly what was sent."""
 
@@ -93,30 +93,30 @@ class _RecordingStructuredLLM:
         return self._result
 
 
-class _RecordingChatAnthropic:
-    """Fake `ChatAnthropic` -- records every construction (proving no
-    ChatAnthropic instance sneaks in additional calls) and hands back a
+class _RecordingChatOpenRouter:
+    """Fake `ChatOpenRouter` -- records every construction (proving no
+    ChatOpenRouter instance sneaks in additional calls) and hands back a
     `_RecordingStructuredLLM` from `.with_structured_output()`."""
 
-    instances: list[_RecordingChatAnthropic] = []
+    instances: list[_RecordingChatOpenRouter] = []
 
     def __init__(self, *args, **kwargs):
         self.init_kwargs = kwargs
         self.capture: dict = {}
-        _RecordingChatAnthropic.instances.append(self)
+        _RecordingChatOpenRouter.instances.append(self)
 
     def with_structured_output(self, schema):  # noqa: ARG002
         return _RecordingStructuredLLM(self.capture, _CANNED_RESULT)
 
 
 @pytest.fixture(autouse=True)
-def _fake_chat_anthropic(monkeypatch):
-    _RecordingChatAnthropic.instances = []
-    monkeypatch.setattr(experiment_a, "ChatAnthropic", _RecordingChatAnthropic)
+def _fake_chat_openrouter(monkeypatch):
+    _RecordingChatOpenRouter.instances = []
+    monkeypatch.setattr(experiment_a, "ChatOpenRouter", _RecordingChatOpenRouter)
     yield
 
 
-def _prompt_text(llm_instance: _RecordingChatAnthropic) -> str:
+def _prompt_text(llm_instance: _RecordingChatOpenRouter) -> str:
     return "\n".join(
         message.content
         for message in llm_instance.capture["messages"]
@@ -134,10 +134,10 @@ def test_context_stuffing_baseline_dumps_real_telemetry_and_makes_one_llm_call(d
 
     assert result is _CANNED_RESULT
 
-    # Exactly one LLM call: one ChatAnthropic construction, one invoke --
+    # Exactly one LLM call: one ChatOpenRouter construction, one invoke --
     # no ReAct loop, no tool-calling round trips.
-    assert len(_RecordingChatAnthropic.instances) == 1
-    llm_instance = _RecordingChatAnthropic.instances[0]
+    assert len(_RecordingChatOpenRouter.instances) == 1
+    llm_instance = _RecordingChatOpenRouter.instances[0]
     assert llm_instance.capture.get("invoke_count") == 1
 
     prompt_text = _prompt_text(llm_instance)
@@ -188,7 +188,7 @@ def test_window_covers_memory_leaks_full_causal_chain(db, scenarios):
 
     experiment_a.run_context_stuffing_baseline(db, incident)
 
-    llm_instance = _RecordingChatAnthropic.instances[0]
+    llm_instance = _RecordingChatOpenRouter.instances[0]
     prompt_text = _prompt_text(llm_instance)
 
     # The earliest metric point ever written for this service is the
@@ -239,7 +239,7 @@ def test_context_covers_root_cause_service_not_just_affected_service(db, scenari
 
     experiment_a.run_context_stuffing_baseline(db, incident)
 
-    llm_instance = _RecordingChatAnthropic.instances[0]
+    llm_instance = _RecordingChatOpenRouter.instances[0]
     prompt_text = _prompt_text(llm_instance)
 
     payment_service = db.execute(

@@ -22,7 +22,7 @@ Three steps, each already idempotent on its own so the whole script is:
    instead of accumulating stale points.
 
 Pure local computation: `sentence-transformers` runs on-device and Qdrant
-is a local Docker container, so this script makes zero Claude/Anthropic
+is a local Docker container, so this script makes zero OpenRouter
 API calls (Phase 4's cost constraint).
 """
 

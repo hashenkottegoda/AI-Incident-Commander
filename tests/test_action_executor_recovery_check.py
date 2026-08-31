@@ -25,14 +25,14 @@ Also covers the bounded-loop-exhaustion branch
 the real node functions and real Postgres, without needing three full
 approve round trips through mocked LLMs.
 
-This entire sub-step makes ZERO Claude/Anthropic API calls: the Action
+This entire sub-step makes ZERO OpenRouter API calls: the Action
 Executor and Recovery Check are pure deterministic simulation + metric
 comparison (BUILD_PLAN.md: "Because remediation_effects is ground truth,
 both the recovery decision and the remediation-eval metrics are
 deterministic"). The (c)/(d) tests below still route through the full
 graph (Triage/Investigation/RAG/Root Cause/Response Planner all run), so
 those two reuse `tests/test_graph_response_planner_e2e.py`'s
-`ChatAnthropic` fakes -- via `tests/test_human_approval.py`'s own
+`ChatOpenRouter` fakes -- via `tests/test_human_approval.py`'s own
 `_run_to_interrupt` helper for (c) -- rather than inventing a new mocking
 pattern, per this sub-step's own instructions.
 """

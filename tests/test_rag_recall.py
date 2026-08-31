@@ -11,7 +11,7 @@ Runs the real ground-truth query set (`backend.rag.recall_eval
 the real `search_historical_incidents` tool function, computes
 Recall@1/@3/@5, and prints the numbers (`-s` to see them) -- no
 placeholders, no mocked retrieval. Pure local `sentence-transformers` +
-Qdrant math, zero Claude/Anthropic calls (Phase 4's cost constraint).
+Qdrant math, zero OpenRouter calls (Phase 4's cost constraint).
 
 Skips cleanly if Qdrant isn't reachable, same pattern as `tests/test_rag.py`.
 """

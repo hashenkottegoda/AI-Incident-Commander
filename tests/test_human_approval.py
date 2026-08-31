@@ -6,7 +6,7 @@ fakes/fixture helpers) one step further: through the real
 `backend.api.approvals` endpoints that resume/decide it.
 
 Covers, against **real Postgres** (checkpointer + `AuditEvent` are real DB
-operations, no `ChatAnthropic` mocking can substitute for that):
+operations, no `ChatOpenRouter` mocking can substitute for that):
 
 1. A HIGH_IMPACT plan genuinely halts the graph -- verified via the
    checkpointer's own `StateSnapshot` (`.next`/`.interrupts`), not just an
@@ -34,7 +34,7 @@ operations, no `ChatAnthropic` mocking can substitute for that):
    commits (simulating two concurrent `/approve` requests), and the loser
    gets `StaleDataError`, not a silent double-decision.
 
-No test in this module makes a real Claude/Anthropic API call: `ChatAnthropic`
+No test in this module makes a real OpenRouter API call: `ChatOpenRouter`
 is monkeypatched via `tests.test_graph_response_planner_e2e`'s fakes.
 """
 

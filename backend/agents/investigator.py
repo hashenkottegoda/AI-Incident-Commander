@@ -8,7 +8,7 @@ and existing behavior run as Experiment C's configuration; pass
 `include_rag=False` for a genuine Experiment B run). See that function's
 docstring for the full reasoning.
 
-BUILD_PLAN.md Phase 3: *"One LangGraph node: `ChatAnthropic` + `ToolNode`
+BUILD_PLAN.md Phase 3: *"One LangGraph node: `ChatOpenRouter` + `ToolNode`
 ReAct loop, ends in a `DiagnosisResult` ... Validates tool-calling mechanics
 end-to-end before the full graph is built."*
 
@@ -20,7 +20,7 @@ Wrapping this in a single-node `StateGraph` now would mean standing up
 machinery this phase doesn't use yet (no interrupt, no re-investigation
 loop, no multi-node routing — that's Phase 5). A plain function that IS
 the node body is the more honest shape: it does real ReAct tool-calling
-via `ChatAnthropic.bind_tools()` exactly as the eventual graph node will,
+via `ChatOpenRouter.bind_tools()` exactly as the eventual graph node will,
 and Phase 5 can lift this logic into a `StateGraph` node without changing
 what it does internally. Building the graph shell now would be premature
 scaffolding for state this phase doesn't have a use for.
@@ -32,11 +32,11 @@ This node does both evidence-gathering (ReAct loop) *and* final diagnosis
 node. `investigation_model` is used throughout — for the tool-calling loop
 *and* the final structured-output call — for two reasons: (1) this node's
 dominant cost and behavior is the ReAct tool loop, which is squarely the
-Investigation role; (2) reusing the same `ChatAnthropic` instance for both
+Investigation role; (2) reusing the same `ChatOpenRouter` instance for both
 calls avoids a mid-run model swap, which per BUILD_PLAN.md's agent-design
 guidance would invalidate any prompt cache built up over the tool-calling
 turns. `investigation_model` and `rca_model` currently default to the same
-model ID anyway (`claude-opus-4-8`) — Phase 5 splits investigation and RCA
+model ID anyway (`nvidia/nemotron-3-super-120b-a12b:free`) — Phase 5 splits investigation and RCA
 into genuinely separate graph nodes, at which point the RCA half moves to
 `rca_model` for real.
 
@@ -50,10 +50,11 @@ blocking the "repeatedly query the same thing" runaway-loop failure mode
 the idea doc calls out. This is a real cost/safety control, not a
 decorative constant. The budget is
 enforced *between* turns, not by truncating a turn's tool calls mid-way —
-Claude can request several tool calls in one turn, and the API requires
-every `tool_use` block in a turn to get a matching `tool_result` before
-the next turn, so a turn is always completed in full even if it pushes the
-running total slightly past the budget; the check that stops the loop runs
+the model can request several tool calls in one turn, and OpenAI-compatible
+tool-calling APIs (which OpenRouter uses) require every tool call in a turn
+to get a matching tool-result message before the next turn, so a turn is
+always completed in full even if it pushes the running total slightly past
+the budget; the check that stops the loop runs
 after each turn completes.
 
 ## Preserving real tool-call history for evidence citation
@@ -71,9 +72,9 @@ from __future__ import annotations
 import json
 import logging
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
+from langchain_openrouter import ChatOpenRouter
 from sqlalchemy.orm import Session
 
 from backend.agents.schemas import DiagnosisResult
@@ -210,8 +211,8 @@ def _run_react_loop(llm_with_tools, tools: list[BaseTool], messages: list[BaseMe
                     content = f"Error: {exc}"
                     status = "error"
             # `status="error"` (not just the "Error: ..." text) is what makes
-            # langchain-anthropic mark the corresponding tool_result block as
-            # `is_error` for the API -- without it a genuine tool failure
+            # the LangChain integration signal the corresponding tool result
+            # as an error to the model -- without it a genuine tool failure
             # looks like a successful call whose result happens to say
             # "Error", losing the model's structured signal to treat it as a
             # failure rather than data.
@@ -232,7 +233,7 @@ def investigate_incident(
 ) -> DiagnosisResult:
     """Run the tool-using investigator against one incident.
 
-    Binds `backend.tools.build_tools(db)` to a `ChatAnthropic` instance
+    Binds `backend.tools.build_tools(db)` to a `ChatOpenRouter` instance
     (`get_settings().investigation_model`, no `temperature`/`top_p` --
     these models reject sampling params), runs a bounded ReAct tool-calling
     loop, then makes one final `.with_structured_output(DiagnosisResult)`
@@ -267,12 +268,12 @@ def investigate_incident(
     if include_rag:
         tools = tools + build_rag_tools(get_qdrant_client())
 
-    # No temperature/top_p: these models reject sampling params (BUILD_PLAN.md
-    # Tech Stack). max_tokens is set explicitly rather than relying on the
-    # SDK default, per the claude-api skill's guidance for non-streaming calls.
-    llm = ChatAnthropic(
+    # No temperature/top_p override -- kept unset for consistent,
+    # prompt-driven behavior; explicit max_tokens, matching investigator.py's
+    # conventions.
+    llm = ChatOpenRouter(
         model=settings.investigation_model,
-        api_key=settings.anthropic_api_key,
+        api_key=settings.openrouter_api_key,
         max_tokens=4096,
     )
     llm_with_tools = llm.bind_tools(tools)
@@ -284,9 +285,9 @@ def investigate_incident(
 
     _run_react_loop(llm_with_tools, tools, messages)
 
-    # Final structured-output call: same ChatAnthropic instance (no tools
+    # Final structured-output call: same ChatOpenRouter instance (no tools
     # bound this time), through LangChain's structured-output binding --
-    # never free-text parsing, never the raw Anthropic SDK's messages.parse().
+    # never free-text parsing, never a raw provider SDK's messages.parse().
     structured_llm = llm.with_structured_output(DiagnosisResult)
     messages.append(HumanMessage(content=STRUCTURED_OUTPUT_INSTRUCTION))
     result = structured_llm.invoke(messages)

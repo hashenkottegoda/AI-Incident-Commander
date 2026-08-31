@@ -30,8 +30,8 @@ appending is the safer default.
 
 from __future__ import annotations
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openrouter import ChatOpenRouter
 
 from backend.agents.schemas import DiagnosisResult
 from backend.agents.state import IncidentState
@@ -103,11 +103,12 @@ def make_root_cause_node():
 
     def root_cause_node(state: IncidentState) -> dict:
         settings = get_settings()
-        # No temperature/top_p (these models reject sampling params);
-        # explicit max_tokens, matching investigator.py's conventions.
-        llm = ChatAnthropic(
+        # No temperature/top_p override -- kept unset for consistent,
+        # prompt-driven behavior; explicit max_tokens, matching
+        # investigator.py's conventions.
+        llm = ChatOpenRouter(
             model=settings.rca_model,
-            api_key=settings.anthropic_api_key,
+            api_key=settings.openrouter_api_key,
             max_tokens=4096,
         )
         structured_llm = llm.with_structured_output(DiagnosisResult)

@@ -7,7 +7,7 @@ API returns ranked hypotheses + alternatives; the loop actually triggers on
 cascading_payment_timeout (via the evidence-sufficiency path even if
 confidences cluster)."*
 
-No test in this module makes a real Claude/Anthropic API call: `ChatAnthropic`
+No test in this module makes a real OpenRouter API call: `ChatOpenRouter`
 is monkeypatched separately in each of the four LLM-calling node modules
 (`triage_node`, `investigation_node`, `root_cause_node`,
 `response_planner_node`) with a small fake chain of responses -- Triage
@@ -18,7 +18,7 @@ stops, Root Cause returns a structured diagnosis, and Response Planner
 returns a single canned SAFE action so these Phase 5-focused tests aren't
 otherwise affected by Phase 6's routing -- exactly the "mock chain of fake
 LLM responses" pattern this task calls for, following `tests/test_rag.py`'s
-`_FakeChatAnthropic` convention.
+`_FakeChatOpenRouter` convention.
 
 The fakes are deliberately pass-aware (first vs. second Investigation/Root
 Cause visit) so this test can prove the conditional re-investigation loop
@@ -72,7 +72,7 @@ pytestmark = pytest.mark.skipif(
 
 
 class _FakeStructuredLLM:
-    """Generic stand-in for `<ChatAnthropic instance>.with_structured_output(...)`'s
+    """Generic stand-in for `<ChatOpenRouter instance>.with_structured_output(...)`'s
     return value when the result doesn't need to vary call-to-call."""
 
     def __init__(self, result):
@@ -82,8 +82,8 @@ class _FakeStructuredLLM:
         return self._result
 
 
-class _FakeTriageChatAnthropic:
-    """Stand-in for `triage_node.ChatAnthropic` -- confirms the reported
+class _FakeTriageChatOpenRouter:
+    """Stand-in for `triage_node.ChatOpenRouter` -- confirms the reported
     service as-is, no surprises."""
 
     def __init__(self, *args, **kwargs):
@@ -97,14 +97,14 @@ class _FakeTriageChatAnthropic:
 
 class _InvestigationPassCounter:
     """Shared across both Investigation node visits (a fresh
-    `ChatAnthropic(...)` is constructed each node execution, so the pass
+    `ChatOpenRouter(...)` is constructed each node execution, so the pass
     number has to live outside any one instance)."""
 
     def __init__(self):
         self.pass_number = 0
 
 
-def _make_fake_investigation_chat_anthropic(
+def _make_fake_investigation_chat_openrouter(
     counter: _InvestigationPassCounter, service, start, end
 ):
     class _FakeInvestigationLLM:
@@ -155,7 +155,7 @@ def _make_fake_investigation_chat_anthropic(
                 ]
             return AIMessage(content="", tool_calls=tool_calls)
 
-    class _FakeInvestigationChatAnthropic:
+    class _FakeInvestigationChatOpenRouter:
         def __init__(self, *args, **kwargs):
             pass
 
@@ -163,7 +163,7 @@ def _make_fake_investigation_chat_anthropic(
             counter.pass_number += 1
             return _FakeInvestigationLLM()
 
-    return _FakeInvestigationChatAnthropic
+    return _FakeInvestigationChatOpenRouter
 
 
 class _RootCausePassCounter:
@@ -171,7 +171,7 @@ class _RootCausePassCounter:
         self.pass_number = 0
 
 
-def _make_fake_root_cause_chat_anthropic(counter: _RootCausePassCounter):
+def _make_fake_root_cause_chat_openrouter(counter: _RootCausePassCounter):
     class _FakeRootCauseStructuredLLM:
         def invoke(self, messages):  # noqa: ARG002
             counter.pass_number += 1
@@ -225,17 +225,17 @@ def _make_fake_root_cause_chat_anthropic(counter: _RootCausePassCounter):
                 evidence=[],
             )
 
-    class _FakeRootCauseChatAnthropic:
+    class _FakeRootCauseChatOpenRouter:
         def __init__(self, *args, **kwargs):
             pass
 
         def with_structured_output(self, schema):  # noqa: ARG002
             return _FakeRootCauseStructuredLLM()
 
-    return _FakeRootCauseChatAnthropic
+    return _FakeRootCauseChatOpenRouter
 
 
-class _FakeResponsePlannerChatAnthropic:
+class _FakeResponsePlannerChatOpenRouter:
     """Phase 6's Response Planner node now runs immediately after Root
     Cause in the full graph (see `backend/graph.py`) -- these Phase
     5-focused tests aren't about the response side, so this fake always
@@ -279,17 +279,17 @@ def _patch_all_fakes(monkeypatch, service, start, end):
     investigation_counter = _InvestigationPassCounter()
     rca_counter = _RootCausePassCounter()
 
-    monkeypatch.setattr(triage_module, "ChatAnthropic", _FakeTriageChatAnthropic)
+    monkeypatch.setattr(triage_module, "ChatOpenRouter", _FakeTriageChatOpenRouter)
     monkeypatch.setattr(
         investigation_module,
-        "ChatAnthropic",
-        _make_fake_investigation_chat_anthropic(investigation_counter, service, start, end),
+        "ChatOpenRouter",
+        _make_fake_investigation_chat_openrouter(investigation_counter, service, start, end),
     )
     monkeypatch.setattr(
-        rca_module, "ChatAnthropic", _make_fake_root_cause_chat_anthropic(rca_counter)
+        rca_module, "ChatOpenRouter", _make_fake_root_cause_chat_openrouter(rca_counter)
     )
     monkeypatch.setattr(
-        response_planner_module, "ChatAnthropic", _FakeResponsePlannerChatAnthropic
+        response_planner_module, "ChatOpenRouter", _FakeResponsePlannerChatOpenRouter
     )
     return investigation_counter, rca_counter
 

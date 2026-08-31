@@ -45,7 +45,7 @@ producing a comparison table that looks complete but isn't.
 
 ## Partial-failure handling: log-and-continue, per (incident, architecture) cell
 
-A `--count 40`/`100` run against the real Anthropic API is real wall-clock
+A `--count 40`/`100` run against the real OpenRouter API is real wall-clock
 time and real spend. Aborting an entire run because ONE incident's ONE
 architecture raised (a transient API error, a rate limit, a genuine bug that
 only one scenario triggers) would throw away everything already completed
@@ -160,7 +160,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Number of incidents to generate (default: 30, the 'dev' dataset "
             "size). BUILD_PLAN.md: --count 5 for a CI smoke run, --count 40 for "
             "the dev loop, --count 100 for occasional portfolio benchmarking -- "
-            "the latter is real wall-clock and real Claude spend."
+            "the latter is real wall-clock time and rate-limited OpenRouter quota."
         ),
     )
     parser.add_argument(

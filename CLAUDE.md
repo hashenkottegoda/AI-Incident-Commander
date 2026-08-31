@@ -39,20 +39,21 @@ CI (`.github/workflows/ci.yml`) runs two jobs on every push/PR to `main`: `uv sy
 `ruff check` + `pytest` against a real Postgres service container, and `npm ci` + `oxlint` +
 `tsc -b && vite build` in `frontend/`.
 
-Environment: copy `.env.example` to `.env`. `ANTHROPIC_API_KEY` is required (no default — the
+Environment: copy `.env.example` to `.env`. `OPENROUTER_API_KEY` is required (no default — the
 app fails fast at startup if missing). Per-role model IDs (`TRIAGE_MODEL`, `INVESTIGATION_MODEL`,
 `RCA_MODEL`, `EMBEDDING_MODEL`) are read from env via `backend/config.py`'s `get_settings()` —
-**never hard-code a model ID in code**; swapping models must be a `.env` change. These Claude
-models reject `temperature`/`top_p` — steer behavior via prompting only. Tests set a dummy
-`ANTHROPIC_API_KEY` in `tests/conftest.py` before any module import, and clear the
+**never hard-code a model ID in code**; swapping models must be a `.env` change. No temperature/
+top_p override is set anywhere — behavior is steered by prompting only, kept consistent across
+whichever OpenRouter model a role is pointed at. Tests set a dummy
+`OPENROUTER_API_KEY` in `tests/conftest.py` before any module import, and clear the
 `get_settings()` lru_cache around every test.
 
 ## Architecture
 
 ### LLM integration: one path only
 
-`langchain-anthropic` (`ChatAnthropic`) is the **single** integration path, bound to
-LangGraph/`ToolNode`. Do not mix raw `anthropic` SDK calls with LangChain calls anywhere — one
+`langchain-openrouter` (`ChatOpenRouter`) is the **single** integration path, bound to
+LangGraph/`ToolNode`. Do not mix raw `openrouter` SDK calls with LangChain calls anywhere — one
 message/tool-serialization path, one place to reason about caching and retries. Structured
 outputs (every node that returns JSON) go through LangChain's structured-output binding, not
 hand-parsed free text.
@@ -115,8 +116,8 @@ recovery_check -> END (MANUAL_INTERVENTION_REQUIRED, budget exhausted)
 
 ### Tools (`backend/tools/`)
 
-Each tool is a typed Python function with a docstring-derived schema bound to Claude's tool-use
-format (logs, metrics, deployments, dependencies, historical incidents via RAG). Unit-tested
+Each tool is a typed Python function with a docstring-derived schema bound to the model's tool-use
+format via LangChain (logs, metrics, deployments, dependencies, historical incidents via RAG). Unit-tested
 directly against seeded data, independent of any agent.
 
 ### RAG (`backend/rag/`)
@@ -166,8 +167,8 @@ log), tool-call efficiency, latency, token cost. Operational metrics (D only, vi
 `run_experiment_d_operational`) measure the closed remediation loop: remediation success rate,
 recovery-verification accuracy, wrong-remediation rate. Run via
 `uv run python -m backend.evaluation.run_experiments`; results served at
-`GET /api/evaluation/results`. A full 4×100 run is thousands of Opus-priced Claude calls — use
-smaller `--count` subsets for development, not the full benchmark.
+`GET /api/evaluation/results`. A full 4×100 run is thousands of OpenRouter calls against
+rate-limited free-tier quota — use smaller `--count` subsets for development, not the full benchmark.
 
 ### Data model (`backend/models/`)
 
@@ -192,7 +193,7 @@ backend/
   api/            FastAPI routers: incidents, simulation, evaluation, approvals, health
   agents/         LangGraph node functions, state, routing, schemas
   graph.py        StateGraph assembly — start here to understand orchestration
-  tools/          Claude tool-bound functions (logs, metrics, deployments, dependencies, RAG)
+  tools/          Model tool-bound functions (logs, metrics, deployments, dependencies, RAG)
   models/         SQLAlchemy models
   rag/            Qdrant client, embedding pipeline, historical incident seed data
   simulation/     synthetic telemetry generator + failure injection engine

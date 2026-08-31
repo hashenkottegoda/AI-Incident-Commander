@@ -36,7 +36,7 @@ Recall@1 is not guaranteed to be 1.0 by construction.
 
 ## What this module does NOT do
 
-No Claude/Anthropic calls anywhere in this file or its test -- Recall@K
+No OpenRouter calls anywhere in this file or its test -- Recall@K
 is pure local-embedding retrieval math, per this phase's cost constraint.
 """
 

@@ -26,23 +26,23 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Anthropic Claude ---------------------------------------------
+    # --- OpenRouter ------------------------------------------------------
     # Required, no default: fail fast at startup rather than at first API call.
-    anthropic_api_key: str = Field(..., description="Anthropic Claude API key.")
+    openrouter_api_key: str = Field(..., description="OpenRouter API key.")
 
     # Per-role model IDs — never hard-coded in agent code (BUILD_PLAN.md).
     # These defaults are BUILD_PLAN.md's current best guess; verify against
-    # the current Anthropic model catalog before relying on them in prod.
+    # the current OpenRouter model catalog before relying on them in prod.
     triage_model: str = Field(
-        default="claude-haiku-4-5",
+        default="nvidia/nemotron-3.5-lightning:free",
         description="Model ID for the cheap/fast Triage classification node.",
     )
     investigation_model: str = Field(
-        default="claude-opus-4-8",
+        default="nvidia/nemotron-3-super-120b-a12b:free",
         description="Model ID for the reasoning-heavy Investigation node.",
     )
     rca_model: str = Field(
-        default="claude-opus-4-8",
+        default="nvidia/nemotron-3-super-120b-a12b:free",
         description="Model ID for the reasoning-heavy Root Cause node.",
     )
 

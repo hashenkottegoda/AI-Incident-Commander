@@ -7,8 +7,8 @@ isn't reachable (start it with `docker compose up -d qdrant`). One test
 also needs Postgres (the investigator-wiring structural check, since it
 injects a real `Incident` row) and carries an additional skip for that.
 
-No test in this module makes a Claude/Anthropic API call. The investigator
-wiring test replaces `ChatAnthropic` with an in-process fake so it can
+No test in this module makes an OpenRouter API call. The investigator
+wiring test replaces `ChatOpenRouter` with an in-process fake so it can
 assert `search_historical_incidents` is actually bound into
 `investigate_incident`'s tool list without spending real API credits or
 network calls (Phase 4's cost constraint: local sentence-transformers +
@@ -274,14 +274,14 @@ def test_build_rag_tools_returns_search_historical_incidents_tool(seeded_client)
     assert [t.name for t in tools] == ["search_historical_incidents"]
 
 
-# --- investigator wiring (structural only -- no real Claude calls) -----------
+# --- investigator wiring (structural only -- no real OpenRouter calls) -----------
 
 
 class _FakeToolBoundLLM:
-    """Stand-in for `ChatAnthropic.bind_tools(...)`'s return value. Its one
+    """Stand-in for `ChatOpenRouter.bind_tools(...)`'s return value. Its one
     `.invoke()` immediately ends the ReAct loop (returns an `AIMessage`
     with no `tool_calls`), so `investigate_incident` never actually
-    dispatches a tool call -- no Qdrant search, no Claude API call, nothing
+    dispatches a tool call -- no Qdrant search, no OpenRouter API call, nothing
     but confirming what tools it *was* handed."""
 
     def __init__(self, tools):
@@ -299,8 +299,8 @@ class _FakeStructuredLLM:
         return self._result
 
 
-class _FakeChatAnthropic:
-    """Stand-in for `ChatAnthropic` itself. `bind_tools` records the full
+class _FakeChatOpenRouter:
+    """Stand-in for `ChatOpenRouter` itself. `bind_tools` records the full
     tool list `investigate_incident` assembled (what this test actually
     asserts on); `with_structured_output` returns a canned `DiagnosisResult`
     so the function completes without any network call at all."""
@@ -311,7 +311,7 @@ class _FakeChatAnthropic:
         pass
 
     def bind_tools(self, tools):
-        _FakeChatAnthropic.last_bound_tools = tools
+        _FakeChatOpenRouter.last_bound_tools = tools
         return _FakeToolBoundLLM(tools)
 
     def with_structured_output(self, schema):  # noqa: ARG002
@@ -335,7 +335,7 @@ def test_investigator_tool_list_includes_search_historical_incidents(monkeypatch
     from backend.simulation.injector import inject_failure
     from backend.simulation.scenario_schema import load_all_scenarios
 
-    monkeypatch.setattr(investigator_module, "ChatAnthropic", _FakeChatAnthropic)
+    monkeypatch.setattr(investigator_module, "ChatOpenRouter", _FakeChatOpenRouter)
 
     db = SessionLocal()
     try:
@@ -346,7 +346,7 @@ def test_investigator_tool_list_includes_search_historical_incidents(monkeypatch
 
         result = investigator_module.investigate_incident(db, incident)
 
-        bound_names = {t.name for t in _FakeChatAnthropic.last_bound_tools}
+        bound_names = {t.name for t in _FakeChatOpenRouter.last_bound_tools}
         assert bound_names == {
             "get_logs",
             "get_metrics",
@@ -376,7 +376,7 @@ def test_investigator_include_rag_false_excludes_search_historical_incidents(mon
     from backend.simulation.injector import inject_failure
     from backend.simulation.scenario_schema import load_all_scenarios
 
-    monkeypatch.setattr(investigator_module, "ChatAnthropic", _FakeChatAnthropic)
+    monkeypatch.setattr(investigator_module, "ChatOpenRouter", _FakeChatOpenRouter)
 
     db = SessionLocal()
     try:
@@ -387,7 +387,7 @@ def test_investigator_include_rag_false_excludes_search_historical_incidents(mon
 
         result = investigator_module.investigate_incident(db, incident, include_rag=False)
 
-        bound_names = {t.name for t in _FakeChatAnthropic.last_bound_tools}
+        bound_names = {t.name for t in _FakeChatOpenRouter.last_bound_tools}
         assert bound_names == {"get_logs", "get_metrics", "get_deployments", "get_dependencies"}
         assert "search_historical_incidents" not in bound_names
         assert result.root_cause_category == "unknown"  # the stub result round-tripped

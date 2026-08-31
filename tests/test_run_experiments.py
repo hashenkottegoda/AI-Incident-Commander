@@ -1,6 +1,6 @@
 """Tests for Phase 7's `backend.evaluation.run_experiments` CLI runner.
 
-Zero real Anthropic API calls. The five `run_experiment_*` functions
+Zero real OpenRouter API calls. The five `run_experiment_*` functions
 (`run_experiment_a/b/c/d/d_operational`) are already exercised end-to-end
 against a real, genuinely-traced `_ScriptedChatModel` by
 `tests/test_harness.py` -- this suite is scoped to `run_experiments.py`'s

@@ -8,7 +8,7 @@ BUILD_PLAN.md's Agent Architecture section, verbatim: *"RESPONSE PLANNER
 
 This single node does three things, in order, for one incident:
 
-1. Calls the Response Planner LLM (`ChatAnthropic.with_structured_output`
+1. Calls the Response Planner LLM (`ChatOpenRouter.with_structured_output`
    over `backend.agents.response_schemas.ResponsePlan`) to propose one or
    more candidate actions given the diagnosed root cause + evidence.
 2. For each candidate, classifies it via
@@ -63,8 +63,8 @@ need for a distinct model/tier ever shows up.
 
 from __future__ import annotations
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openrouter import ChatOpenRouter
 from sqlalchemy.orm import Session
 
 from backend.agents.response_schemas import ResponsePlan
@@ -149,11 +149,12 @@ def make_response_planner_node(db: Session):
 
     def response_planner_node(state: IncidentState) -> dict:
         settings = get_settings()
-        # No temperature/top_p (these models reject sampling params);
-        # explicit max_tokens, matching root_cause_node's conventions.
-        llm = ChatAnthropic(
+        # No temperature/top_p override -- kept unset for consistent,
+        # prompt-driven behavior; explicit max_tokens, matching
+        # root_cause_node's conventions.
+        llm = ChatOpenRouter(
             model=settings.rca_model,
-            api_key=settings.anthropic_api_key,
+            api_key=settings.openrouter_api_key,
             max_tokens=2048,
         )
         structured_llm = llm.with_structured_output(ResponsePlan)

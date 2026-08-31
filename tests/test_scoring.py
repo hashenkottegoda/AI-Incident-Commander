@@ -3,10 +3,10 @@
 Follows `tests/test_tools.py`'s skip-without-Postgres pattern: these tests
 need real seeded `LogEntry`/`MetricPoint`/`Deployment`/`TraceLite` rows
 (via `inject_failure`) to check id validity against, but -- unlike
-`tests/test_investigator.py` -- make ZERO LLM/Claude API calls. Every
+`tests/test_investigator.py` -- make ZERO LLM/OpenRouter API calls. Every
 `DiagnosisResult`/`SourceRef` here is hand-constructed, not model-generated,
 so this module should run fast, free, and skip only on missing Postgres
-(never on a missing `ANTHROPIC_API_KEY`).
+(never on a missing `OPENROUTER_API_KEY`).
 """
 
 from __future__ import annotations
@@ -465,7 +465,7 @@ def test_tool_call_efficiency_negative_evidence_count_raises():
 # `cascading_payment_timeout`'s `scale_service` is a real
 # `ineffective_remediations` entry -- both confirmed against the real YAML
 # in `tests/test_action_executor_recovery_check.py` already), not
-# hand-waved fixtures. No LLM/Claude API calls anywhere in this section --
+# hand-waved fixtures. No LLM/OpenRouter API calls anywhere in this section --
 # same "pure deterministic simulation + metric comparison" territory as
 # `backend.agents.action_executor_node`/`backend.agents.recovery_check_node`
 # themselves.

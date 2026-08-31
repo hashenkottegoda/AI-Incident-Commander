@@ -1,10 +1,10 @@
 """Tests for Phase 7's experiment harness (`backend.evaluation.harness`).
 
-Zero real Anthropic API calls anywhere in this module. `ChatAnthropic` is
+Zero real OpenRouter API calls anywhere in this module. `ChatOpenRouter` is
 replaced everywhere with `_ScriptedChatModel`, a small but GENUINE
 `langchain_core.language_models.chat_models.BaseChatModel` subclass -- a
 real `Runnable`, unlike the project's existing duck-typed test fakes (e.g.
-`tests/test_graph_end_to_end.py`'s `_FakeChatAnthropic` convention, plain
+`tests/test_graph_end_to_end.py`'s `_FakeChatOpenRouter` convention, plain
 Python objects with an `.invoke()` *method* that never touches LangChain's
 `Runnable.invoke()` -> `CallbackManager` -> tracer machinery). That
 distinction matters here specifically: `backend.evaluation.harness` relies
@@ -90,8 +90,8 @@ class _ScriptedChatModel(BaseChatModel):
     it, optionally sleeping before each generation (for the latency test).
 
     `bind_tools`/`with_structured_output` are deliberately simplified
-    versions of what `ChatAnthropic` really does -- this fake does not
-    reimplement Anthropic's actual tool-calling wire format. What matters
+    versions of what `ChatOpenRouter` really does -- this fake does not
+    reimplement OpenRouter's actual tool-calling wire format. What matters
     for these tests is that every `.invoke()`, however it's reached
     (directly, via `.bind(...)`, or via a `RunnableSequence` built by
     `with_structured_output`), is a REAL traced `Runnable` call, so
@@ -161,7 +161,7 @@ def test_harness_experiment_a_zero_tool_calls_and_captures_tokens(db, scenarios,
 
     fake = _ScriptedChatModel(responses=[_ai_message("diagnosis", in_tok=500, out_tok=123)])
     fake.queue_structured_result(_CANNED_A_RESULT)
-    monkeypatch.setattr(experiment_a, "ChatAnthropic", lambda *a, **k: fake)  # noqa: ARG005
+    monkeypatch.setattr(experiment_a, "ChatOpenRouter", lambda *a, **k: fake)  # noqa: ARG005
 
     result = harness.run_experiment_a(db, incident)
 
@@ -191,7 +191,7 @@ def test_harness_experiment_a_latency_reflects_real_wall_clock(db, scenarios, mo
         responses=[_ai_message("diagnosis", in_tok=10, out_tok=10)], sleep_seconds=sleep_for
     )
     fake.queue_structured_result(_CANNED_A_RESULT)
-    monkeypatch.setattr(experiment_a, "ChatAnthropic", lambda *a, **k: fake)  # noqa: ARG005
+    monkeypatch.setattr(experiment_a, "ChatOpenRouter", lambda *a, **k: fake)  # noqa: ARG005
 
     result = harness.run_experiment_a(db, incident)
 
@@ -244,7 +244,7 @@ def test_harness_experiment_b_tool_call_count_and_token_aggregation(db, scenario
     ]
     fake = _ScriptedChatModel(responses=responses)
     fake.queue_structured_result(_CANNED_A_RESULT)
-    monkeypatch.setattr(investigator_mod, "ChatAnthropic", lambda *a, **k: fake)  # noqa: ARG005
+    monkeypatch.setattr(investigator_mod, "ChatOpenRouter", lambda *a, **k: fake)  # noqa: ARG005
 
     result = harness.run_experiment_b(db, incident)
 
@@ -273,7 +273,7 @@ def test_harness_experiment_c_wires_include_rag_true(db, scenarios, monkeypatch)
     ]
     fake = _ScriptedChatModel(responses=responses)
     fake.queue_structured_result(_CANNED_A_RESULT)
-    monkeypatch.setattr(investigator_mod, "ChatAnthropic", lambda *a, **k: fake)  # noqa: ARG005
+    monkeypatch.setattr(investigator_mod, "ChatOpenRouter", lambda *a, **k: fake)  # noqa: ARG005
 
     result = harness.run_experiment_c(db, incident)
 
@@ -397,11 +397,11 @@ def _patch_all_graph_fakes(monkeypatch, service: str, ground_truth_category: str
 
     triage_fake = _ScriptedChatModel(responses=[_ai_message("triage", in_tok=20, out_tok=5)])
     triage_fake.queue_structured_result(TriageResult(affected_services=[service]))
-    monkeypatch.setattr(triage_module, "ChatAnthropic", lambda *a, **k: triage_fake)  # noqa: ARG005
+    monkeypatch.setattr(triage_module, "ChatOpenRouter", lambda *a, **k: triage_fake)  # noqa: ARG005
 
     investigation_fake = _make_investigation_fake(service)
     monkeypatch.setattr(
-        investigation_module, "ChatAnthropic", lambda *a, **k: investigation_fake  # noqa: ARG005
+        investigation_module, "ChatOpenRouter", lambda *a, **k: investigation_fake  # noqa: ARG005
     )
 
     rca_fake = _ScriptedChatModel(responses=[_ai_message("rca", in_tok=80, out_tok=20)])
@@ -420,7 +420,7 @@ def _patch_all_graph_fakes(monkeypatch, service: str, ground_truth_category: str
             diagnostic_confidence=0.9,
         )
     )
-    monkeypatch.setattr(rca_module, "ChatAnthropic", lambda *a, **k: rca_fake)  # noqa: ARG005
+    monkeypatch.setattr(rca_module, "ChatOpenRouter", lambda *a, **k: rca_fake)  # noqa: ARG005
 
     planner_fake = _ScriptedChatModel(responses=[_ai_message("plan", in_tok=15, out_tok=5)])
     planner_fake.queue_structured_result(
@@ -436,7 +436,7 @@ def _patch_all_graph_fakes(monkeypatch, service: str, ground_truth_category: str
         )
     )
     monkeypatch.setattr(
-        response_planner_module, "ChatAnthropic", lambda *a, **k: planner_fake  # noqa: ARG005
+        response_planner_module, "ChatOpenRouter", lambda *a, **k: planner_fake  # noqa: ARG005
     )
 
     # `run_experiment_d` calls `run_incident_graph_to_diagnosis`, which halts
@@ -525,7 +525,7 @@ def _make_multi_pass_investigation_fake(service: str, passes: int) -> _ScriptedC
     re-investigation loop needs its own 2 scripted turns, and the SAME
     `_ScriptedChatModel` instance is reused across every pass (the harness
     tests' `lambda *a, **k: fake` monkeypatch convention returns one fixed
-    object regardless of how many times `ChatAnthropic(...)` is
+    object regardless of how many times `ChatOpenRouter(...)` is
     constructed), so its `responses` list must hold `passes` copies up
     front rather than just one."""
     single_pass = _make_investigation_fake(service).responses
@@ -581,7 +581,7 @@ def _make_multi_pass_planner_fake(action_type: str, passes: int) -> _ScriptedCha
 def _patch_operational_graph_fakes(
     monkeypatch, service: str, ground_truth_category: str, action_type: str, *, passes: int
 ):
-    """Patch `ChatAnthropic` in every LLM-calling node for a full
+    """Patch `ChatOpenRouter` in every LLM-calling node for a full
     `run_incident_graph` run that recommends `action_type` on every one of
     `passes` re-investigation passes. `passes=1` for a plan that resolves
     (or is SAFE) on the first attempt; >1 for an ineffective HIGH_IMPACT
@@ -598,19 +598,19 @@ def _patch_operational_graph_fakes(
     # backend/graph.py's edges).
     triage_fake = _ScriptedChatModel(responses=[_ai_message("triage", in_tok=20, out_tok=5)])
     triage_fake.queue_structured_result(TriageResult(affected_services=[service]))
-    monkeypatch.setattr(triage_module, "ChatAnthropic", lambda *a, **k: triage_fake)  # noqa: ARG005
+    monkeypatch.setattr(triage_module, "ChatOpenRouter", lambda *a, **k: triage_fake)  # noqa: ARG005
 
     investigation_fake = _make_multi_pass_investigation_fake(service, passes)
     monkeypatch.setattr(
-        investigation_module, "ChatAnthropic", lambda *a, **k: investigation_fake  # noqa: ARG005
+        investigation_module, "ChatOpenRouter", lambda *a, **k: investigation_fake  # noqa: ARG005
     )
 
     rca_fake = _make_multi_pass_rca_fake(ground_truth_category, passes)
-    monkeypatch.setattr(rca_module, "ChatAnthropic", lambda *a, **k: rca_fake)  # noqa: ARG005
+    monkeypatch.setattr(rca_module, "ChatOpenRouter", lambda *a, **k: rca_fake)  # noqa: ARG005
 
     planner_fake = _make_multi_pass_planner_fake(action_type, passes)
     monkeypatch.setattr(
-        response_planner_module, "ChatAnthropic", lambda *a, **k: planner_fake  # noqa: ARG005
+        response_planner_module, "ChatOpenRouter", lambda *a, **k: planner_fake  # noqa: ARG005
     )
 
 

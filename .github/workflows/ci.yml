@@ -17,7 +17,7 @@ jobs:
     # backend/config.py's default) so the app/Alembic connect to the
     # service container below without any extra setup.
     #
-    # ANTHROPIC_API_KEY is required with no default (backend/config.py's
+    # OPENROUTER_API_KEY is required with no default (backend/config.py's
     # Settings fails fast at import time otherwise). tests/conftest.py sets
     # the same dummy value via os.environ.setdefault(...) before any test
     # module import, but the "Apply database migrations" step invokes
@@ -25,7 +25,7 @@ jobs:
     # Settings validation fails without it here too.
     env:
       DATABASE_URL: postgresql+psycopg://incident_commander:incident_commander@localhost:5432/incident_commander
-      ANTHROPIC_API_KEY: sk-test-dummy
+      OPENROUTER_API_KEY: sk-test-dummy
 
     # Matches docker-compose.yml's postgres service (same dev-only
     # credentials) so tests/test_db.py exercises real Postgres in CI

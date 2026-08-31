@@ -12,7 +12,7 @@ vs. still-degraded."*
 ## Zero LLM calls
 
 Same as `backend.agents.action_executor_node`: this is plain SQL +
-arithmetic, no `ChatAnthropic` call anywhere in this module. The comparison
+arithmetic, no `ChatOpenRouter` call anywhere in this module. The comparison
 below is what makes the outcome auditable/testable rather than a model's
 subjective read of "does this look fixed" -- and it is genuinely
 independent of `AuditEvent.execution_outcome` (already set by the Action

@@ -75,7 +75,7 @@ under test. Same model, same `max_tokens`, no `temperature`/`top_p`
 
 `get_logs`/`get_metrics`/`get_deployments` are called here as plain
 Python functions (`backend.tools.logs.get_logs`, etc.), not bound via
-`make_get_*_tool`/`ChatAnthropic.bind_tools()` -- Experiment A is defined
+`make_get_*_tool`/`ChatOpenRouter.bind_tools()` -- Experiment A is defined
 as "no tools, no selective retrieval," so there is no LLM-driven tool
 loop to bind them into. `get_dependencies` is deliberately not queried
 here: BUILD_PLAN.md's Experiment A description names only
@@ -109,8 +109,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_openrouter import ChatOpenRouter
 from sqlalchemy.orm import Session
 
 from backend.agents.schemas import DiagnosisResult
@@ -269,7 +269,7 @@ def _assemble_context(db: Session, incident: Incident, start: str, end: str) -> 
 
 def run_context_stuffing_baseline(db: Session, incident: Incident) -> DiagnosisResult:
     """Run Experiment A: dump all telemetry for `incident`'s investigation
-    window into one prompt and make exactly one Claude API call for the
+    window into one prompt and make exactly one OpenRouter API call for the
     diagnosis. No tools, no ReAct loop, no selective retrieval -- see
     module docstring for the full reasoning behind window sizing, id
     citability, and model choice.
@@ -284,11 +284,11 @@ def run_context_stuffing_baseline(db: Session, incident: Incident) -> DiagnosisR
 
     context = _assemble_context(db, incident, start, end)
 
-    # No temperature/top_p: these models reject sampling params
-    # (BUILD_PLAN.md Tech Stack), same as `investigate_incident`.
-    llm = ChatAnthropic(
+    # No temperature/top_p override -- kept unset for consistent,
+    # prompt-driven behavior, same as `investigate_incident`.
+    llm = ChatOpenRouter(
         model=settings.investigation_model,
-        api_key=settings.anthropic_api_key,
+        api_key=settings.openrouter_api_key,
         max_tokens=4096,
     )
     # `.with_structured_output(...)` + a single `.invoke(...)` below is the

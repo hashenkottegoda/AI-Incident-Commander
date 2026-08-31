@@ -1,6 +1,6 @@
 """Phase 7's experiment harness (BUILD_PLAN.md Phase 7) -- wraps each of the
 four already-committed experiment functions/coroutines (Experiments A/B/C/D)
-to capture wall-clock latency, a tool-call count, and Claude API token usage
+to capture wall-clock latency, a tool-call count, and OpenRouter API token usage
 alongside the `DiagnosisResult` each one already returns, WITHOUT modifying
 any of their signatures:
 
@@ -26,7 +26,7 @@ outside.
 `RunCollectorCallbackHandler` onto a `ContextVar` (`run_collector_var`)
 that is registered via `register_configure_hook(run_collector_var,
 inheritable=False)` at import time. Every LangChain `Runnable.invoke()`/
-`ainvoke()` call -- a `ChatAnthropic` LLM call, a real `BaseTool.invoke()`
+`ainvoke()` call -- a `ChatOpenRouter` LLM call, a real `BaseTool.invoke()`
 call, a `RunnableSequence` built by `.with_structured_output()` -- goes
 through `ensure_config()`/the callback-manager configuration path, which
 reads `_configure_hooks` and silently attaches whatever callback handler is
@@ -45,8 +45,9 @@ Wrapped in `with collect_runs() as cb:` around a real ReAct investigation:
   entry in `cb.traced_runs`, each carrying `usage_metadata` (input/output
   tokens) inside
   `run.outputs["generations"][i][j]["message"]["kwargs"]["usage_metadata"]`
-  -- the same place `langchain-anthropic` populates a real `ChatAnthropic`
-  response's `AIMessage.usage_metadata` from the API's `usage` field.
+  -- the same place any LangChain chat model integration (including
+  `langchain-openrouter`) populates a real `AIMessage.usage_metadata`
+  from the API's `usage` field.
 - The final `.with_structured_output(DiagnosisResult).invoke(...)` call
   shows up as a `run_type="chain"` root run (a `RunnableSequence` of the
   model call + output-parsing step) whose *nested* LLM call is reachable
@@ -73,7 +74,7 @@ Wrapped in `with collect_runs() as cb:` around a real ReAct investigation:
 anywhere in the collected run tree for that call -- i.e. the capture
 mechanism itself found nothing to sum, not "found some usage-less calls
 and treated them as zero." This should never happen for a real
-`ChatAnthropic` call (every real API response carries `usage`), but stays
+`ChatOpenRouter` call (every real API response carries `usage`), but stays
 `None` rather than `0` for a fake/test double whose scripted `AIMessage`s
 happen to omit `usage_metadata` entirely, so a genuine "no usage data
 available" is never silently indistinguishable from "zero tokens used" in
@@ -95,7 +96,7 @@ needed -- `len(final_state.tool_call_log_ids)` is used directly rather than
 counted from the collected run tree, per this task's explicit guidance.
 Latency and token capture are still applied uniformly via `collect_runs()`
 around the whole graph invocation, for the same reason B/C's are: the
-graph's nodes make real `ChatAnthropic` calls too, and there is no cheaper
+graph's nodes make real `ChatOpenRouter` calls too, and there is no cheaper
 way to observe their token usage from outside `backend/graph.py` without
 touching its nodes' internals.
 """
@@ -134,7 +135,7 @@ ExperimentId = Literal["A", "B", "C", "D"]
 # "chat_model" is the modern value, "llm" is the legacy/generic one; both
 # appear across LangChain's own history and either is possible depending on
 # exactly which Runnable path a given call takes, so both are checked
-# (`ChatAnthropic` calls trace as "llm" against the installed langchain-core
+# (`ChatOpenRouter` calls trace as "llm" against the installed langchain-core
 # version -- see `uv.lock`).
 _LLM_RUN_TYPES = frozenset({"llm", "chat_model"})
 _TOOL_RUN_TYPE = "tool"
@@ -146,7 +147,7 @@ class ExperimentRun(NamedTuple):
     `diagnosis` is the same `DiagnosisResult` the wrapped experiment
     function/coroutine already returns -- this class only adds the
     measurement fields Phase 7's comparison table also needs (BUILD_PLAN.md:
-    "tool-call efficiency, latency, and token cost (from Claude API usage
+    "tool-call efficiency, latency, and token cost (from OpenRouter API usage
     fields)").
     """
 
@@ -177,7 +178,7 @@ def _run_usage_tokens(run: Run) -> tuple[int, int] | None:
     particular run carries no `usage_metadata` (see module docstring for
     the observed shape: `run.outputs["generations"][i][j]["message"]
     ["kwargs"]["usage_metadata"]`, the same place any AIMessage's
-    `usage_metadata` attribute -- which `langchain-anthropic` populates
+    `usage_metadata` attribute -- which `langchain-openrouter` populates
     from the real API's `usage` field -- serializes to under tracing)."""
     if not run.outputs:
         return None
@@ -319,7 +320,7 @@ async def run_experiment_d(
     `run_incident_graph` call does not stop at Root Cause (`response_planner`
     runs unconditionally right after it, before the graph can return in
     either the SAFE or HIGH_IMPACT branch), which would leak an extra real
-    `ChatAnthropic` call's latency/tokens into this "immediately after RCA"
+    `ChatOpenRouter` call's latency/tokens into this "immediately after RCA"
     diagnostic measurement -- exactly what BUILD_PLAN.md's diagnostic-
     evaluation section says must not happen ("scored immediately after the
     RCA stage, before any response/remediation, so response planning can't

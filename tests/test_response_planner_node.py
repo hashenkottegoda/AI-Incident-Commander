@@ -1,8 +1,8 @@
 """Isolated (mocked-LLM) tests for Phase 6's Response Planner + inline Risk
 Classifier node (`backend/agents/response_planner_node.py`).
 
-No test in this module makes a real Claude/Anthropic API call --
-`response_planner_node.ChatAnthropic` is monkeypatched with a small fake
+No test in this module makes a real OpenRouter API call --
+`response_planner_node.ChatOpenRouter` is monkeypatched with a small fake
 returning a canned `ResponsePlan`, following
 `tests/test_graph_end_to_end.py`'s `_FakeStructuredLLM` convention.
 
@@ -60,15 +60,15 @@ class _FakeStructuredLLM:
         return self._result
 
 
-def _make_fake_chat_anthropic(plan: ResponsePlan):
-    class _FakeResponsePlannerChatAnthropic:
+def _make_fake_chat_openrouter(plan: ResponsePlan):
+    class _FakeResponsePlannerChatOpenRouter:
         def __init__(self, *args, **kwargs):
             pass
 
         def with_structured_output(self, schema):  # noqa: ARG002
             return _FakeStructuredLLM(plan)
 
-    return _FakeResponsePlannerChatAnthropic
+    return _FakeResponsePlannerChatOpenRouter
 
 
 # --- Fixtures ------------------------------------------------------------
@@ -138,7 +138,7 @@ def test_safe_only_plan_creates_auto_executed_audit_event_and_sets_executing(
             )
         ]
     )
-    monkeypatch.setattr(node_module, "ChatAnthropic", _make_fake_chat_anthropic(plan))
+    monkeypatch.setattr(node_module, "ChatOpenRouter", _make_fake_chat_openrouter(plan))
 
     node = node_module.make_response_planner_node(db)
     result = node(_diagnosed_state(incident))
@@ -178,7 +178,7 @@ def test_high_impact_action_creates_pending_approval_audit_event_and_sets_awaiti
             )
         ]
     )
-    monkeypatch.setattr(node_module, "ChatAnthropic", _make_fake_chat_anthropic(plan))
+    monkeypatch.setattr(node_module, "ChatOpenRouter", _make_fake_chat_openrouter(plan))
 
     node = node_module.make_response_planner_node(db)
     result = node(_diagnosed_state(incident))
@@ -221,7 +221,7 @@ def test_mixed_plan_with_any_high_impact_action_routes_to_awaiting_approval(
             ),
         ]
     )
-    monkeypatch.setattr(node_module, "ChatAnthropic", _make_fake_chat_anthropic(plan))
+    monkeypatch.setattr(node_module, "ChatOpenRouter", _make_fake_chat_openrouter(plan))
 
     node = node_module.make_response_planner_node(db)
     result = node(_diagnosed_state(incident))
@@ -251,7 +251,7 @@ def test_unrecognized_action_type_still_creates_high_impact_audit_row(monkeypatc
             )
         ]
     )
-    monkeypatch.setattr(node_module, "ChatAnthropic", _make_fake_chat_anthropic(plan))
+    monkeypatch.setattr(node_module, "ChatOpenRouter", _make_fake_chat_openrouter(plan))
 
     node = node_module.make_response_planner_node(db)
     result = node(_diagnosed_state(incident))

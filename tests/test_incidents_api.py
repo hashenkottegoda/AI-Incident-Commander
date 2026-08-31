@@ -1,7 +1,7 @@
 """Fast, free tests for `backend/api/incidents.py` that don't touch the LLM,
 plus Phase 8's `GET /api/incidents` / `GET /{incident_id}` read endpoints.
 
-`POST /api/incidents/{id}/investigate` calls a real Claude API when given a
+`POST /api/incidents/{id}/investigate` calls a real OpenRouter API when given a
 valid incident -- that's covered separately (and skipped by default) in
 `tests/test_investigator.py`. This module covers everything about the route
 that's checkable without spending API credits: the 404 path, so a
@@ -16,8 +16,8 @@ The two Phase 8 read endpoints are covered here too:
   injected-but-never-investigated incident).
 - `GET /{incident_id}`'s "real investigation ran" and "reached response
   planning" paths reuse `tests/test_graph_end_to_end.py` and
-  `tests/test_graph_response_planner_e2e.py`'s `ChatAnthropic`-faking
-  fixtures (no real Claude/Anthropic API call), following
+  `tests/test_graph_response_planner_e2e.py`'s `ChatOpenRouter`-faking
+  fixtures (no real OpenRouter API call), following
   `tests/test_human_approval.py`'s convention of importing those modules'
   fakes rather than redefining them.
 

@@ -14,7 +14,7 @@ deterministic) -- reused here rather than reinvented so this test's only
 genuinely new assertions are about `NodeProgressEvent` rows, not about
 control flow already covered elsewhere.
 
-No test in this module makes a real Claude/Anthropic API call: `ChatAnthropic`
+No test in this module makes a real OpenRouter API call: `ChatOpenRouter`
 is monkeypatched in each LLM-calling node module, matching every other
 graph-level test in this suite.
 
@@ -70,7 +70,7 @@ class _FakeStructuredLLM:
         return self._result
 
 
-class _FakeTriageChatAnthropic:
+class _FakeTriageChatOpenRouter:
     def __init__(self, *args, **kwargs):
         pass
 
@@ -80,7 +80,7 @@ class _FakeTriageChatAnthropic:
         return _FakeStructuredLLM(TriageResult(affected_services=["checkout-service"]))
 
 
-def _make_fake_investigation_chat_anthropic(service: str, start: str, end: str):
+def _make_fake_investigation_chat_openrouter(service: str, start: str, end: str):
     """Single decisive pass: covers both required evidence tools up front,
     then stops -- never triggers the re-investigation loop, so this test's
     node-order assertion is deterministic."""
@@ -107,18 +107,18 @@ def _make_fake_investigation_chat_anthropic(service: str, start: str, end: str):
             ]
             return AIMessage(content="", tool_calls=tool_calls)
 
-    class _FakeInvestigationChatAnthropic:
+    class _FakeInvestigationChatOpenRouter:
         def __init__(self, *args, **kwargs):
             pass
 
         def bind_tools(self, tools):  # noqa: ARG002
             return _FakeInvestigationLLM()
 
-    return _FakeInvestigationChatAnthropic
+    return _FakeInvestigationChatOpenRouter
 
 
-def _make_fake_root_cause_chat_anthropic():
-    class _FakeRootCauseChatAnthropic:
+def _make_fake_root_cause_chat_openrouter():
+    class _FakeRootCauseChatOpenRouter:
         def __init__(self, *args, **kwargs):
             pass
 
@@ -144,18 +144,18 @@ def _make_fake_root_cause_chat_anthropic():
             )
             return _FakeStructuredLLM(result)
 
-    return _FakeRootCauseChatAnthropic
+    return _FakeRootCauseChatOpenRouter
 
 
-def _make_fake_response_planner_chat_anthropic(plan: ResponsePlan):
-    class _FakeResponsePlannerChatAnthropic:
+def _make_fake_response_planner_chat_openrouter(plan: ResponsePlan):
+    class _FakeResponsePlannerChatOpenRouter:
         def __init__(self, *args, **kwargs):
             pass
 
         def with_structured_output(self, schema):  # noqa: ARG002
             return _FakeStructuredLLM(plan)
 
-    return _FakeResponsePlannerChatAnthropic
+    return _FakeResponsePlannerChatOpenRouter
 
 
 def _patch_all_fakes(monkeypatch, service, start, end, response_plan: ResponsePlan):
@@ -164,17 +164,17 @@ def _patch_all_fakes(monkeypatch, service, start, end, response_plan: ResponsePl
     import backend.agents.root_cause_node as rca_module
     import backend.agents.triage_node as triage_module
 
-    monkeypatch.setattr(triage_module, "ChatAnthropic", _FakeTriageChatAnthropic)
+    monkeypatch.setattr(triage_module, "ChatOpenRouter", _FakeTriageChatOpenRouter)
     monkeypatch.setattr(
         investigation_module,
-        "ChatAnthropic",
-        _make_fake_investigation_chat_anthropic(service, start, end),
+        "ChatOpenRouter",
+        _make_fake_investigation_chat_openrouter(service, start, end),
     )
-    monkeypatch.setattr(rca_module, "ChatAnthropic", _make_fake_root_cause_chat_anthropic())
+    monkeypatch.setattr(rca_module, "ChatOpenRouter", _make_fake_root_cause_chat_openrouter())
     monkeypatch.setattr(
         response_planner_module,
-        "ChatAnthropic",
-        _make_fake_response_planner_chat_anthropic(response_plan),
+        "ChatOpenRouter",
+        _make_fake_response_planner_chat_openrouter(response_plan),
     )
 
 

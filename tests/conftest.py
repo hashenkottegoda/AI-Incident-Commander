@@ -3,7 +3,7 @@ import os
 # Some modules (e.g. backend.main) validate Settings at import time, so a
 # required env var must be present before any test module's imports run.
 # Centralized here instead of a per-file setdefault + import-order workaround.
-os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-dummy")
+os.environ.setdefault("OPENROUTER_API_KEY", "sk-test-dummy")
 
 import pytest  # noqa: E402
 

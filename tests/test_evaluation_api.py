@@ -1,6 +1,6 @@
 """Tests for `GET /api/evaluation/results`.
 
-No Postgres/Anthropic dependency -- this endpoint only reads a JSON file
+No Postgres/OpenRouter dependency -- this endpoint only reads a JSON file
 off disk (written offline by `backend.evaluation.run_experiments`), so
 unlike `tests/test_simulation_api.py` there's no skipif-on-live-Postgres
 guard needed here, same as `tests/test_health.py`.

@@ -2,11 +2,11 @@
 
 Compiling and inspecting the graph performs no I/O (node factory closures
 only capture references -- see `build_incident_graph`'s docstring), so
-these run without any live Postgres/Qdrant/Claude dependency except the
+these run without any live Postgres/Qdrant/OpenRouter dependency except the
 one test that attaches a real `AsyncPostgresSaver` (skipped cleanly when
 Postgres isn't reachable, same convention as the rest of this suite).
 
-No test in this module makes a Claude/Anthropic API call.
+No test in this module makes an OpenRouter API call.
 """
 
 from __future__ import annotations

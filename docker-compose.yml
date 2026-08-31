@@ -51,11 +51,11 @@ services:
       QDRANT_URL: http://qdrant:6333
       # Sourced from the host shell / a local .env file (via Compose's env
       # passthrough) — never hardcoded here. See .env.example.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY in your environment or .env file}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?Set OPENROUTER_API_KEY in your environment or .env file}
       VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
-      TRIAGE_MODEL: ${TRIAGE_MODEL:-claude-haiku-4-5}
-      INVESTIGATION_MODEL: ${INVESTIGATION_MODEL:-claude-opus-4-8}
-      RCA_MODEL: ${RCA_MODEL:-claude-opus-4-8}
+      TRIAGE_MODEL: ${TRIAGE_MODEL:-nvidia/nemotron-3.5-lightning:free}
+      INVESTIGATION_MODEL: ${INVESTIGATION_MODEL:-nvidia/nemotron-3-super-120b-a12b:free}
+      RCA_MODEL: ${RCA_MODEL:-nvidia/nemotron-3-super-120b-a12b:free}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
     depends_on:
       postgres:

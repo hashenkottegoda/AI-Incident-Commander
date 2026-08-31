@@ -47,9 +47,9 @@ from __future__ import annotations
 import json
 import logging
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
+from langchain_openrouter import ChatOpenRouter
 from sqlalchemy.orm import Session
 
 from backend.agents.schemas import EvidenceItem, SourceRef
@@ -204,11 +204,12 @@ def make_investigation_node(db: Session):
         settings = get_settings()
         tools = build_tools(db)
 
-        # No temperature/top_p (these models reject sampling params);
-        # explicit max_tokens, matching investigator.py's conventions.
-        llm = ChatAnthropic(
+        # No temperature/top_p override -- kept unset for consistent,
+        # prompt-driven behavior; explicit max_tokens, matching
+        # investigator.py's conventions.
+        llm = ChatOpenRouter(
             model=settings.investigation_model,
-            api_key=settings.anthropic_api_key,
+            api_key=settings.openrouter_api_key,
             max_tokens=4096,
         )
         llm_with_tools = llm.bind_tools(tools)

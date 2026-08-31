@@ -308,7 +308,7 @@ async def run_incident_graph_to_diagnosis(
     Cause: `response_planner` sits UNCONDITIONALLY between `root_cause` and
     the `human_approval`/`action_executor` branch (see this module's graph
     diagram above), so it always runs -- and always makes one real
-    `ChatAnthropic.with_structured_output(ResponsePlan)` call and writes
+    `ChatOpenRouter.with_structured_output(ResponsePlan)` call and writes
     `AuditEvent` rows -- before `run_incident_graph` can return, regardless
     of whether the proposed plan turns out SAFE-only (straight through to
     `action_executor`) or HIGH_IMPACT (paused at `human_approval`'s

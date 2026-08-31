@@ -1,6 +1,6 @@
-"""Phase 2's tool layer: typed Python functions bound to Claude's tool-use
-format via LangChain (`langchain-anthropic`/`langchain-core`, per
-BUILD_PLAN.md's "single integration path" rule — no raw `anthropic` SDK
+"""Phase 2's tool layer: typed Python functions bound to OpenRouter's
+tool-use format via LangChain (`langchain-openrouter`/`langchain-core`, per
+BUILD_PLAN.md's "single integration path" rule — no raw provider SDK
 tool schemas here).
 
 ## Tool set
@@ -56,8 +56,8 @@ decorated function via `infer_schema=True`. There's no built-in
 "exclude this one positional param" switch for a plain sync tool
 function, so a required `db: Session` argument would otherwise leak into
 the tool's `args_schema` — the LLM would be asked to fill in a
-`Session`, which is both wrong and unfillable, and would 400 on Claude's
-side (no JSON schema for an opaque `Session` type). A factory bound per
+`Session`, which is both wrong and unfillable, and would 400 on
+OpenRouter's side (no JSON schema for an opaque `Session` type). A factory bound per
 request is also exactly the shape Phase 3 needs anyway: it builds one
 `Session` per request/graph run and must hand each node a *set* of tools
 already wired to that session (see `build_tools` below) — a global
@@ -69,7 +69,7 @@ requirement BUILD_PLAN.md calls for.
 type-hint-derived: with it, `@tool` parses a Google-style `Args:` block
 and attaches each arg's description to that field's JSON schema, and the
 function's summary line becomes the tool's top-level `description` — both
-of which `ChatAnthropic.bind_tools()` forwards into the Claude tool-use
+of which `ChatOpenRouter.bind_tools()` forwards into the OpenRouter tool-use
 schema.
 
 ## Return shape
@@ -122,7 +122,7 @@ __all__ = [
 def build_tools(db: Session) -> list[BaseTool]:
     """Return every investigation tool bound to one request-scoped `db`.
 
-    Convenience for Phase 3's ReAct loop (`ChatAnthropic.bind_tools(...)`
+    Convenience for Phase 3's ReAct loop (`ChatOpenRouter.bind_tools(...)`
     / `ToolNode(...)`), which needs the full set wired to the same session
     in one call rather than importing and invoking each factory
     individually.

@@ -109,7 +109,7 @@ The same seed always reproduces the exact same incidents — so the comparison i
 ## Run it yourself
 
 ```bash
-cp .env.example .env          # add your ANTHROPIC_API_KEY
+cp .env.example .env          # add your OPENROUTER_API_KEY
 docker compose up -d          # postgres + qdrant + backend
 uv run alembic upgrade head
 
@@ -127,7 +127,7 @@ Backend tests: `uv run pytest` · dashboard commands: see `frontend/README.md`.
 
 ## Built with
 
-**Python 3.12** · FastAPI · Pydantic v2 · **LangGraph** (`StateGraph`, `interrupt()`, Postgres checkpointer) · `langchain-anthropic` (**Claude**) · PostgreSQL / SQLAlchemy · **Qdrant** + local `sentence-transformers` embeddings · **React 19** / TypeScript / Tailwind 4 · pytest · ruff · oxlint · Docker Compose · GitHub Actions CI
+**Python 3.12** · FastAPI · Pydantic v2 · **LangGraph** (`StateGraph`, `interrupt()`, Postgres checkpointer) · `langchain-openrouter` (**OpenRouter**, free-tier models) · PostgreSQL / SQLAlchemy · **Qdrant** + local `sentence-transformers` embeddings · **React 19** / TypeScript / Tailwind 4 · pytest · ruff · oxlint · Docker Compose · GitHub Actions CI
 
 ---
 
