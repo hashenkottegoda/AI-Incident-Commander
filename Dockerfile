@@ -22,6 +22,16 @@ COPY pyproject.toml uv.lock README.md ./
 # the image matches the committed lockfile exactly.
 RUN uv sync --frozen --no-dev
 
+# Data directories read at runtime (scenario ground truth + RAG seed data),
+# copied before the application source since they change far less often than
+# backend/ — keeps this layer cached across ordinary source-only edits.
+# Required at runtime, not just dev: backend/simulation/scenario_schema.py
+# resolves SCENARIOS_DIR to /app/failure_scenarios and
+# backend/rag/historical_incidents.py resolves its seed path to
+# /app/historical_incidents/historical_incidents.yaml inside the container.
+COPY failure_scenarios/ ./failure_scenarios/
+COPY historical_incidents/ ./historical_incidents/
+
 # Now copy the application source.
 COPY backend/ ./backend/
 
