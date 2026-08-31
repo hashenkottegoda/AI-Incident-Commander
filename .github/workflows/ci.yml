@@ -68,6 +68,9 @@ jobs:
       - name: Apply database migrations
         run: uv run alembic upgrade head
 
+      - name: Provision LangGraph checkpoint tables
+        run: uv run python -m backend.scripts.setup_checkpointer
+
       - name: Test (pytest)
         run: uv run pytest
 
