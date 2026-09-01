@@ -11,6 +11,8 @@ No test in this module makes an OpenRouter API call.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import psycopg
 import pytest
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -178,6 +180,7 @@ class _FakeIncident:
     id = 123
     severity = Severity.P1
     service = _FakeService()
+    detected_at = datetime(2026, 9, 1, 12, 0, 0)
 
 
 def test_initial_state_starts_in_triaging_not_detected():
@@ -186,6 +189,7 @@ def test_initial_state_starts_in_triaging_not_detected():
     assert state["incident_id"] == 123
     assert state["severity"] == Severity.P1
     assert state["affected_services"] == ["checkout-service"]
+    assert state["detected_at"] == _FakeIncident.detected_at
 
 
 # --- Postgres checkpointer attachment (skipped without Postgres) -----------

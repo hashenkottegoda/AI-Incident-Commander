@@ -168,6 +168,20 @@ class DiagnosisResult(BaseModel):
             "clearly support any of them."
         )
     )
+    # Deliberately NOT constrained with `min_length=1`: `DiagnosisResult` is
+    # shared across all four eval experiments (A/B/C/D) AND the standalone
+    # investigator, and an empty `hypotheses` from a weak baseline is
+    # MEANINGFUL SIGNAL about that architecture's quality -- schema-rejecting
+    # it would distort the very A/B/C/D comparison the eval exists to make.
+    # Weak/reasoning models (e.g. GLM-5.3-Flash) also intermittently omit the
+    # `hypotheses` wrapper entirely despite the RCA prompt's "exactly one
+    # entry" instruction; the graph's diagnosis producer
+    # (`backend.agents.root_cause_node`) repairs that case by synthesizing a
+    # single hypothesis from the `root_cause_category` the model DID commit
+    # to, rather than crashing an otherwise-complete diagnosis over a missing
+    # wrapper field -- see that node for the fallback. `routing.
+    # confidence_gap_below_threshold` also guards `if not state.hypotheses`
+    # defensively (belt and suspenders).
     hypotheses: list[Hypothesis] = Field(
         default_factory=list,
         description=(

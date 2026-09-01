@@ -229,17 +229,20 @@ def initial_state(incident: Incident) -> dict[str, Any]:
     state as the graph begins, before the Triage node runs and hands off to
     `INVESTIGATING`).
 
-    `severity` and the initial `affected_services` guess are seeded
-    straight from the `Incident` row -- realistic detection context from
-    the alerting system that created it, not a ground-truth leak (see
-    `backend.agents.triage_node`'s docstring). The Triage node confirms or
-    expands `affected_services` from there.
+    `severity`, `detected_at`, and the initial `affected_services` guess are
+    seeded straight from the `Incident` row -- realistic detection context
+    from the alerting system that created it, not a ground-truth leak (see
+    `backend.agents.triage_node`'s docstring, which already promises
+    `detected_at` as part of that context). The Triage node confirms or
+    expands `affected_services` from there; Investigation uses `detected_at`
+    to anchor its tool-call query windows instead of guessing one.
     """
     return {
         "incident_id": incident.id,
         "incident_status": IncidentStatus.TRIAGING,
         "severity": incident.severity,
         "affected_services": [incident.service.name],
+        "detected_at": incident.detected_at,
     }
 
 

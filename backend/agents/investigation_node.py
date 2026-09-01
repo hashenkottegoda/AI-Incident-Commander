@@ -185,9 +185,13 @@ def _describe_tool_result(
 
 
 def _incident_context_message(state: IncidentState) -> str:
+    detected_at = (
+        state.detected_at.isoformat() if state.detected_at is not None else "unknown"
+    )
     return (
         f"Incident #{state.incident_id}\n"
         f"Affected service(s): {', '.join(state.affected_services) or 'unknown'}\n"
+        f"Detected at: {detected_at}\n"
         f"Severity: {state.severity.value if state.severity is not None else 'unknown'}\n\n"
         "Investigate this incident using the available tools."
     )
@@ -207,11 +211,20 @@ def make_investigation_node(db: Session):
 
         # No temperature/top_p override -- kept unset for consistent,
         # prompt-driven behavior; explicit max_tokens, matching
-        # investigator.py's conventions.
+        # investigator.py's conventions. Same headroom rationale as
+        # root_cause_node.py: a model's reasoning spend bills against this
+        # same ceiling and is empirically highly variable per call, so a too
+        # -tight budget risks a reasoning burst starving a mid-loop turn of
+        # its tool call entirely (the loop reads that as "model concluded
+        # on its own" and exits early -- a silent truncated investigation,
+        # not a crash, but still a real quality loss). Kept lower than
+        # root_cause_node's 16384 since this call happens up to
+        # MAX_TOOL_CALLS times per investigation pass and the cost
+        # multiplies accordingly.
         llm = ChatOpenRouter(
             model=settings.investigation_model,
             api_key=settings.openrouter_api_key,
-            max_tokens=4096,
+            max_tokens=8192,
         )
         # Free-tier OpenRouter models sit behind a shared, fluctuating-capacity
         # pool -- transient 502/429 "upstream overloaded" responses are routine,

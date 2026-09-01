@@ -33,7 +33,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openrouter import ChatOpenRouter
 
-from backend.agents.schemas import DiagnosisResult
+from backend.agents.schemas import DiagnosisResult, Hypothesis
 from backend.agents.state import IncidentState
 from backend.agents.structured_output import TRANSIENT_OPENROUTER_ERRORS, invoke_structured
 from backend.config import get_settings
@@ -110,11 +110,26 @@ def make_root_cause_node():
         settings = get_settings()
         # No temperature/top_p override -- kept unset for consistent,
         # prompt-driven behavior; explicit max_tokens, matching
-        # investigator.py's conventions.
+        # investigator.py's conventions. max_tokens must cover BOTH a
+        # model's reasoning spend and its real output -- OpenRouter's
+        # unified `reasoning` field bills chain-of-thought against this same
+        # ceiling. Empirically (live GLM-5.3-flash calls against this
+        # node's exact prompt shape, 2026-09) reasoning-token spend is
+        # highly variable per call -- observed from a few dozen tokens up to
+        # a full 4096-token budget exhausted on an *identical* prompt across
+        # repeated calls, with no reliable correlation to prompt content.
+        # OpenRouter's `reasoning={"max_tokens": N}` param was tried as an
+        # alternative cap and found NOT to be reliably enforced by this
+        # model/route (asked for 16, observed 200+ actually spent), so the
+        # fix here is real headroom on the shared ceiling, not a reasoning
+        # cap. A full budget exhaustion means zero tokens left for the
+        # actual structured tool call, which surfaces as `None` out of
+        # `invoke_structured` (see structured_output.py) -- consistently
+        # across retries, since the underlying cause doesn't change.
         llm = ChatOpenRouter(
             model=settings.rca_model,
             api_key=settings.openrouter_api_key,
-            max_tokens=4096,
+            max_tokens=16384,
         )
         # Free-tier OpenRouter models sit behind a shared, fluctuating-capacity
         # pool -- transient 502/429 "upstream overloaded" responses are routine,
@@ -137,6 +152,35 @@ def make_root_cause_node():
         # never fires. Retry that case here too before giving up.
         result = invoke_structured(structured_llm, messages, DiagnosisResult)
 
+        # Graceful degradation for weak/reasoning models. GLM-5.3-Flash (and
+        # similar free-tier models) intermittently omit the `hypotheses`
+        # wrapper from their structured output entirely -- despite
+        # RCA_SYSTEM_PROMPT's explicit "EXACTLY ONE entry" instruction -- while
+        # still committing to a `root_cause_category` and `diagnostic_confidence`.
+        # `DiagnosisResult.hypotheses` is deliberately NOT `min_length`-
+        # constrained (that constraint is shared across the A/B/C/D eval schema,
+        # where an empty list is meaningful signal, and it converted this weak-
+        # model omission into hard 500s -- confirmed live, incidents 17080/17085,
+        # 2026-09-01). Repair rather than reject: the category + evidence the
+        # model DID produce is a usable, explainable diagnosis, so synthesize the
+        # single hypothesis the model failed to wrap rather than crashing an
+        # otherwise-complete incident over a missing field. This runs ONLY here
+        # (the graph's diagnosis producer); `investigator.py` stays frozen.
+        # `root_cause_category` is a required Literal (never None), so an empty
+        # `hypotheses` list is the only condition to guard on here.
+        hypotheses = result.hypotheses
+        if not hypotheses:
+            hypotheses = [
+                Hypothesis(
+                    category=result.root_cause_category,
+                    rationale=(
+                        "Synthesized from the model's chosen root_cause_category; "
+                        "the model did not return an explicit hypothesis list."
+                    ),
+                    confidence=result.diagnostic_confidence,
+                )
+            ]
+
         existing_descriptions = {item.description for item in state.evidence}
         merged_evidence = list(state.evidence) + [
             item for item in result.evidence if item.description not in existing_descriptions
@@ -144,7 +188,7 @@ def make_root_cause_node():
 
         return {
             "root_cause": result.root_cause_category,
-            "hypotheses": result.hypotheses,
+            "hypotheses": hypotheses,
             "alternative_hypotheses": result.alternative_hypotheses,
             "diagnostic_confidence": result.diagnostic_confidence,
             "evidence": merged_evidence,

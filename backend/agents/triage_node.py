@@ -76,9 +76,13 @@ class TriageResult(BaseModel):
 def _triage_prompt(state: IncidentState) -> str:
     reported_services = ", ".join(state.affected_services) or "unknown"
     severity = state.severity.value if state.severity is not None else "unknown"
+    detected_at = (
+        state.detected_at.isoformat() if state.detected_at is not None else "unknown"
+    )
     return (
         f"Incident #{state.incident_id}\n"
         f"Reported affected service(s): {reported_services}\n"
+        f"Detected at: {detected_at}\n"
         f"Severity (as assigned by the alerting system that created this "
         f"incident): {severity}\n\n"
         "Confirm the affected service list for this incident."
@@ -98,12 +102,23 @@ def make_triage_node():
         settings = get_settings()
         # No temperature/top_p override -- kept unset for consistent,
         # prompt-driven behavior; explicit max_tokens, matching
-        # investigator.py's conventions. max_tokens is small: this is a
-        # classification call, not a reasoning-heavy one.
+        # investigator.py's conventions. This is a classification call, not
+        # a reasoning-heavy one, but max_tokens is NOT small: OpenRouter's
+        # unified `reasoning` field bills a model's chain-of-thought against
+        # this SAME ceiling, and empirically (live GLM-5.3-flash calls,
+        # 2026-09) reasoning-token spend per call is highly variable and
+        # NOT bounded by prompt simplicity -- observed anywhere from 0 to a
+        # full 4096-token budget exhausted on an identical prompt across
+        # repeated calls. A too-tight ceiling means reasoning alone can
+        # consume the whole budget, leaving zero tokens for the actual
+        # tool-call/output, which surfaces as `None` out of
+        # `invoke_structured` (see structured_output.py) -- consistently,
+        # not flakily, since the underlying cause doesn't change between
+        # retries. Real headroom here, not an arbitrary bump.
         llm = ChatOpenRouter(
             model=settings.triage_model,
             api_key=settings.openrouter_api_key,
-            max_tokens=512,
+            max_tokens=4096,
         )
         # Free-tier OpenRouter models sit behind a shared, fluctuating-capacity
         # pool -- transient 502/429 "upstream overloaded" responses are routine,

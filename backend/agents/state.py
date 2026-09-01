@@ -11,6 +11,22 @@ root_cause, diagnostic_confidence, alternative_hypotheses[],
 recommended_actions[], approval_decision, execution_result_id,
 recovery_result"*
 
+## `detected_at` — added beyond the literal field list above
+
+Not in BUILD_PLAN.md's literal field enumeration, but Triage's own module
+docstring (`backend.agents.triage_node`) already promises "the incident's
+initial detection context (service, detected_at, severity ...)" and
+Investigation needs a real anchor timestamp to choose sane tool-call query
+windows around (get_logs/get_metrics/get_deployments/get_dependencies all
+take a time range) — without it, the model has to guess a window with no
+grounding at all. A single `datetime` is exactly the "compact reasoning
+state, not bulk data" this class already holds `severity` as, so this is
+filling a real gap, not a design deviation. `Optional`/default `None`
+(matching `severity`'s own optionality) rather than required: several
+existing tests construct `IncidentState` directly with only `incident_id`
+set, and in practice `initial_state()` always populates it from the
+`Incident` row before the graph runs.
+
 This module defines the FULL schema now (Phase 5) even though only the
 fields through Root Cause are populated before Phase 6 exists —
 `recommended_actions`/`approval_decision`/`execution_result_id`/
@@ -48,6 +64,7 @@ in as a side channel outside the state.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -70,6 +87,10 @@ class IncidentState(BaseModel):
     incident_status: IncidentStatus = IncidentStatus.DETECTED
     severity: Severity | None = None
     affected_services: list[str] = Field(default_factory=list)
+    # See module docstring's "`detected_at` — added beyond the literal field
+    # list above" section for why this is here despite not being in
+    # BUILD_PLAN.md's literal enumeration.
+    detected_at: datetime | None = None
 
     # --- Investigation evidence (references, not bulk payloads) ---------
     tool_call_log_ids: list[int] = Field(default_factory=list)

@@ -152,11 +152,16 @@ def make_response_planner_node(db: Session):
         settings = get_settings()
         # No temperature/top_p override -- kept unset for consistent,
         # prompt-driven behavior; explicit max_tokens, matching
-        # root_cause_node's conventions.
+        # root_cause_node's conventions -- including its headroom rationale:
+        # a model's reasoning spend bills against this same ceiling and is
+        # empirically highly variable per call (see root_cause_node.py's
+        # comment for the live measurements this is based on), so the
+        # budget has to cover a reasoning burst AND the real output, not
+        # just the output alone.
         llm = ChatOpenRouter(
             model=settings.rca_model,
             api_key=settings.openrouter_api_key,
-            max_tokens=2048,
+            max_tokens=16384,
         )
         # Free-tier OpenRouter models sit behind a shared, fluctuating-capacity
         # pool -- transient 502/429 "upstream overloaded" responses are routine,
