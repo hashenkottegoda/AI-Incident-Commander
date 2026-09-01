@@ -123,6 +123,20 @@ cd frontend && npm ci && npm run dev    # → http://localhost:5173
 
 Backend tests: `uv run pytest` · dashboard commands: see `frontend/README.md`.
 
+## Documentation
+
+Full docs live in [`docs/`](docs/README.md):
+
+| | |
+|---|---|
+| [Architecture](docs/architecture.md) | graph, nodes, state, routing loops, risk classifier, HITL `interrupt()` |
+| [API Reference](docs/api-reference.md) | every endpoint with request/response shapes |
+| [Data Model](docs/data-model.md) | tables, `incident_status` lifecycle, audit trail |
+| [Simulation](docs/simulation.md) | telemetry generator, failure injection, ground-truth scenarios |
+| [RAG Layer](docs/rag.md) | embeddings, Qdrant, structured retrieval, Recall@K |
+| [Evaluation](docs/evaluation.md) | A/B/C/D experiments, metrics, running the harness |
+| [Operations](docs/operations.md) | setup, env vars, commands, CI, troubleshooting |
+
 ---
 
 ## Built with
